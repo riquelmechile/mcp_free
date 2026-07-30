@@ -16,6 +16,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Validate scripts and manifests
+        run: |
+          bash -n scripts/*.sh
+          node -e "JSON.parse(require('fs').readFileSync('.codex-plugin/plugin.json', 'utf8'))"
       - run: npm install
       - name: Check
         run: npm run check > ci-log.txt 2>&1

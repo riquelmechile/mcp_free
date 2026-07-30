@@ -38,6 +38,7 @@ export const config = {
   maxReadBytes: intEnv('MCP_MAX_READ_BYTES', 1_048_576),
   maxOutputBytes: intEnv('MCP_MAX_OUTPUT_BYTES', 262_144),
   commandTimeoutMs: intEnv('MCP_COMMAND_TIMEOUT_MS', 120_000),
+  developmentTimeoutMs: intEnv('MCP_DEVELOPMENT_TIMEOUT_MS', 1_800_000),
   rateLimitPerMinute: intEnv('MCP_RATE_LIMIT_PER_MINUTE', 120),
   stateDir: path.resolve(process.env.MCP_STATE_DIR ?? path.join(home, '.local', 'state', 'mcp-free')),
   logLevel: process.env.MCP_LOG_LEVEL ?? 'info',

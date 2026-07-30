@@ -12,8 +12,10 @@ import { errorResult, textResult } from './helpers.js';
 const WORKSPACE_COMMANDS = new Set([
   'git', 'node', 'npm', 'npx', 'pnpm', 'yarn', 'tsx', 'tsc', 'python', 'python3', 'pytest',
   'go', 'cargo', 'rustc', 'make', 'cmake', 'ninja', 'rg', 'fd', 'find', 'ls', 'cat', 'sed',
-  'grep', 'head', 'tail', 'wc', 'jq', 'curl', 'gentle-ai', 'opencode', 'codex'
+  'grep', 'head', 'tail', 'wc', 'jq', 'curl', 'gentle-ai'
 ]);
+
+const CODING_AGENT_EXECUTABLES = new Set(['opencode', 'codex', 'claude', 'gemini']);
 
 export function registerWorkspaceTools(server: McpServer): void {
   server.registerTool('filesystem_write', {
@@ -100,7 +102,7 @@ export function registerWorkspaceTools(server: McpServer): void {
 
   server.registerTool('workspace_execute', {
     title: 'Run workspace command',
-    description: 'Execute an argv array without a shell inside an allowed project root. Intended for Git, tests, builds, Gentle AI, OpenCode, and development tools.',
+    description: 'Execute an argv array without a shell inside an allowed project root. Intended for Git, tests, builds, Gentle AI maintenance, and bounded development tools. Coding agents must use development_execute.',
     inputSchema: {
       argv: z.array(z.string()).min(1).max(100),
       cwd: z.string(),
@@ -112,6 +114,9 @@ export function registerWorkspaceTools(server: McpServer): void {
     const started = Date.now();
     try {
       const executable = path.basename(argv[0]!);
+      if (CODING_AGENT_EXECUTABLES.has(executable)) {
+        throw new Error(`${executable} must be launched through development_execute so Gentle AI preparation, Git baselining, verification, and receipts cannot be bypassed.`);
+      }
       if (!WORKSPACE_COMMANDS.has(executable)) throw new Error(`Executable is not allowed in workspace mode: ${executable}`);
       const resolvedCwd = await resolveAllowedPath(cwd, { mustExist: true });
       assertWorkspaceCwd(resolvedCwd);

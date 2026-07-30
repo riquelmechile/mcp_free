@@ -11,11 +11,12 @@ function truncate(value: string): string {
 
 export async function runCommand(
   argv: string[],
-  options: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; stdin?: string } = {}
+  options: { cwd?: string; timeoutMs?: number; maxTimeoutMs?: number; env?: Record<string, string>; stdin?: string } = {}
 ): Promise<CommandResult> {
   if (argv.length === 0) throw new Error('argv must not be empty');
   const cwd = path.resolve(options.cwd ?? config.home);
-  const timeoutMs = Math.min(options.timeoutMs ?? config.commandTimeoutMs, 15 * 60_000);
+  const maxTimeoutMs = options.maxTimeoutMs ?? 15 * 60_000;
+  const timeoutMs = Math.min(options.timeoutMs ?? config.commandTimeoutMs, maxTimeoutMs);
   const started = Date.now();
 
   return await new Promise<CommandResult>((resolve, reject) => {

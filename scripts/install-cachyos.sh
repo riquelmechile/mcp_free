@@ -65,7 +65,9 @@ MCP_AUTH_TOKEN=
 MCP_MAX_READ_BYTES=1048576
 MCP_MAX_OUTPUT_BYTES=262144
 MCP_COMMAND_TIMEOUT_MS=120000
+MCP_DEVELOPMENT_TIMEOUT_MS=1800000
 MCP_RATE_LIMIT_PER_MINUTE=120
+GENTLE_AI_NO_SELF_UPDATE=1
 MCP_STATE_DIR=$STATE_DIR
 MCP_LOG_LEVEL=info
 YDOTOOL_SOCKET=/run/user/$UID/.ydotool_socket
@@ -73,8 +75,11 @@ ENV
   chmod 600 "$ENV_FILE"
 else
   sed -i "s/^MCP_MODE=.*/MCP_MODE=$MODE/" "$ENV_FILE"
+  grep -q '^MCP_DEVELOPMENT_TIMEOUT_MS=' "$ENV_FILE" || printf '\nMCP_DEVELOPMENT_TIMEOUT_MS=1800000\n' >> "$ENV_FILE"
+  grep -q '^GENTLE_AI_NO_SELF_UPDATE=' "$ENV_FILE" || printf 'GENTLE_AI_NO_SELF_UPDATE=1\n' >> "$ENV_FILE"
 fi
 
+SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 cat > "$UNIT_DIR/mcp-free.service" <<UNIT
 [Unit]
 Description=MCP Free computer-control server for CachyOS
@@ -86,6 +91,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$ROOT_DIR
 EnvironmentFile=$ENV_FILE
+Environment=PATH=$SERVICE_PATH
 ExecStart=$(command -v node) $ROOT_DIR/dist/server.js
 Restart=on-failure
 RestartSec=3
@@ -116,4 +122,6 @@ echo
 echo "Installed in mode: $MODE"
 echo "Config: $ENV_FILE"
 echo "Logs: journalctl --user -u mcp-free -f"
+echo "Development setup: ./scripts/setup-gentle-development.sh opencode ~/code/MI_PROYECTO"
+echo "Then restart mcp-free.service and call development_status before development_execute."
 echo "Next: create an OpenAI Secure MCP Tunnel and run ./scripts/setup-secure-tunnel.sh"

@@ -1,68 +1,100 @@
 # MCP Free para CachyOS
 
-Servidor **Model Context Protocol (MCP)** para conectar ChatGPT en modo desarrollador con un computador CachyOS y permitirle inspeccionar y operar archivos, terminal, procesos, aplicaciones, portapapeles y escritorio KDE/Wayland.
+Servidor **Model Context Protocol (MCP)** para conectar ChatGPT en modo desarrollador con un computador CachyOS. Permite inspeccionar y operar archivos, terminal, procesos, aplicaciones, portapapeles y escritorio KDE/Wayland, y ahora puede delegar desarrollo real al ecosistema configurado por **Gentle AI 2.2.2**.
 
-El diseño toma de Gentle AI 2.2.2 su enfoque de **resultado primero + evidencia + recibos**: inspeccionar antes de actuar, ejecutar la acción mínima, verificar el resultado y emitir evidencia ligada al contenido exacto. Los recibos son **tamper-evident** mediante una cadena SHA-256; no se presentan como físicamente inmutables.
+El diseño usa resultado primero, evidencia y recibos: inspeccionar, ejecutar la acción mínima, verificar de forma independiente y emitir evidencia ligada al contenido exacto. Los recibos son **tamper-evident** mediante una cadena SHA-256; no se presentan como almacenamiento físicamente inmutable.
 
 ## Estado verificado de compatibilidad con ChatGPT — 30 de julio de 2026
 
-- OpenAI lanzó **Secure MCP Tunnels el 19 de mayo de 2026**.
-- El túnel mantiene el MCP privado: `tunnel-client` abre tráfico HTTPS saliente y reenvía las llamadas al endpoint local. No requiere dominio, DNS ni puerto entrante.
+- OpenAI lanzó Secure MCP Tunnels el 19 de mayo de 2026.
+- `tunnel-client` abre tráfico HTTPS saliente hacia OpenAI y reenvía las llamadas a `http://127.0.0.1:8787/mcp`; no requiere dominio, DNS ni puerto entrante.
 - Crear o editar un túnel requiere `Tunnels: Read + Manage`; ejecutarlo y seleccionarlo desde ChatGPT requiere `Tunnels: Read + Use`.
-- La documentación oficial específica de Developer mode ofrece MCP completo con herramientas de modificación/escritura a **ChatGPT Business, Enterprise y Edu en web**.
-- **ChatGPT Pro** está documentado para MCP personalizado de lectura/obtención. La documentación oficial no incluye Plus entre los planes con MCP personalizado de escritura completa.
-- Ver una sección general de Apps o Plugins en Plus no demuestra que el workspace permita registrar y ejecutar herramientas MCP de escritura. La comprobación práctica es revisar Developer mode y, al escanear herramientas, confirmar que ChatGPT admite las acciones `write` del servidor.
-- Secure MCP Tunnel es adecuado para desarrollo y pruebas privadas. Para distribuir públicamente un plugin, OpenAI exige un endpoint HTTPS público y estable.
+- Developer mode con herramientas MCP de modificación/escritura está documentado para ChatGPT Business, Enterprise y Edu en web.
+- ChatGPT Pro está documentado para MCP personalizado de lectura/obtención. Plus no figura oficialmente con MCP personalizado de escritura completa.
+- Secure MCP Tunnel sirve para desarrollo y pruebas privadas; publicar públicamente un plugin exige un endpoint HTTPS público y estable.
 
 Documentación oficial:
 
 - <https://developers.openai.com/api/docs/guides/secure-mcp-tunnels>
-- <https://developers.openai.com/changelog>
 - <https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt>
 - <https://developers.openai.com/plugins/build/plugins>
 
-El endpoint local es:
+## Modos y capacidades
 
-```text
-http://127.0.0.1:8787/mcp
-```
+### `observe`
 
-## Capacidades
+- Estado de CachyOS y sesión gráfica.
+- Listado, lectura y búsqueda de archivos.
+- Procesos, ventanas, portapapeles y capturas.
+- Estado de Gentle AI y agentes de desarrollo configurados.
+- Lectura y verificación de la cadena de recibos.
 
-### Lectura (`observe`)
+### `workspace`
 
-- Estado de CachyOS, sesión gráfica y backends disponibles.
-- Listar, leer y buscar archivos.
-- Listar procesos.
-- Capturar pantalla como imagen MCP.
-- Listar ventanas y leer portapapeles.
-- Consultar Gentle AI.
-- Listar, leer y verificar la cadena de recibos.
-
-### Trabajo (`workspace`)
-
-Incluye lectura y además:
+Incluye `observe` y además:
 
 - Crear, reemplazar, parchear y mover archivos dentro de `MCP_ALLOWED_ROOTS`.
-- Ejecutar comandos de desarrollo mediante `argv` sin shell: Git, Node, npm, pnpm, Python, Go, Cargo, tests, builds, `gentle-ai`, `opencode` y `codex`.
+- Ejecutar Git, Node, npm, pnpm, Python, Go, Cargo, tests y builds mediante `argv`, sin shell.
+- Delegar desarrollo a OpenCode, Codex, Claude Code o Gemini CLI mediante la herramienta dedicada `development_execute`.
 
-### Control total (`full`)
+### `full`
 
 Incluye todo lo anterior y además:
 
-- Shell Bash arbitraria.
-- Acceso a cualquier ruta del sistema con los permisos del usuario que ejecuta el servicio.
-- Borrado seguro a papelera o borrado permanente confirmado.
-- Iniciar y detener procesos.
-- Abrir aplicaciones y URLs.
-- Escribir portapapeles.
-- Click, escritura, teclas, scroll y foco de ventanas.
+- Shell Bash arbitraria con los permisos del usuario.
+- Acceso a rutas permitidas por el usuario del servicio.
+- Borrado, procesos, aplicaciones, URLs, portapapeles, teclado, mouse y ventanas.
+- Opción explícita de autoaprobar permisos del agente de código, sólo después de autorización.
 
 Las rutas de credenciales (`~/.ssh`, `~/.gnupg`, keyrings, etc.) permanecen bloqueadas incluso en `full` salvo que se configure deliberadamente `MCP_ALLOW_SECRETS=1`.
 
+## Desarrollo real con Gentle AI
+
+Gentle AI no es el modelo que escribe el código: configura el ecosistema del agente con skills, memoria, SDD, subagentes, permisos y Receipt-Driven Development. MCP Free prepara el proyecto y lanza el agente configurado.
+
+### `development_status`
+
+Disponible incluso en `observe`. Comprueba:
+
+- Git root, rama, HEAD y cambios existentes.
+- `gentle-ai version`, `gentle-ai doctor` y review mode.
+- existencia de `.atl/skill-registry.md`;
+- OpenCode, Codex, Claude Code y Gemini CLI;
+- evidencia de que cada agente fue configurado por Gentle AI;
+- agente recomendado para ejecución no interactiva.
+
+### `development_execute`
+
+Disponible en `workspace` y `full`. Siempre es tier 2 y requiere aprobación explícita más `confirm=true`.
+
+Flujo:
+
+1. Valida un Git worktree dentro de `MCP_ALLOWED_ROOTS`.
+2. Exige `gentle-ai doctor` saludable.
+3. Detecta un agente realmente configurado por Gentle AI.
+4. Refresca el skill registry del proyecto.
+5. Captura HEAD, rama, estado y diff inicial para proteger trabajo previo.
+6. Ejecuta el agente:
+   - OpenCode: `opencode run --agent gentle-orchestrator`;
+   - Codex: `codex exec`;
+   - Claude Code: `claude --print -p`;
+   - Gemini CLI: `gemini -p`.
+7. El prompt exige routing orgánico Gentle/RDD, skills, subagentes cuando corresponda, pruebas y no hacer commit/push/reset por defecto.
+8. MCP Free ejecuta independientemente `git diff --check` y las verificaciones detectadas o proporcionadas.
+9. Comprueba que el agente no cambió la rama ni el HEAD.
+10. Emite un recibo encadenado con el estado anterior/posterior y los resultados.
+
+`workspace_execute` bloquea el lanzamiento directo de agentes de código para impedir que se salten esta preparación y verificación.
+
+`use_sdd=false` conserva el routing orgánico: cambios pequeños directos; trabajo amplio delegado; SDD sólo cuando reduce ambigüedad. Use `use_sdd=true` cuando lo solicite explícitamente para una funcionalidad sustancial.
+
+`auto_approve_agent=false` es el valor seguro. En OpenCode, habilitarlo agrega `--auto`, por lo que sólo está permitido en `full` después de aprobación explícita.
+
+Guía completa: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
 ## Instalación en CachyOS
 
-Comience en `observe`; no instale directamente en `full` salvo que ya haya probado el servidor y revisado sus herramientas.
+Comience en `observe`:
 
 ```bash
 git clone https://github.com/riquelmechile/mcp_free.git
@@ -70,26 +102,7 @@ cd mcp_free
 ./scripts/install-cachyos.sh --observe --desktop-control
 ```
 
-Cuando esté conforme:
-
-```bash
-nano ~/.config/mcp-free/env
-# Cambie MCP_MODE=observe por workspace o full.
-systemctl --user restart mcp-free
-```
-
-El instalador:
-
-1. Instala dependencias con `pacman` y opcionalmente `kdotool` desde AUR.
-2. Instala dependencias Node, ejecuta pruebas y compila TypeScript.
-3. Crea `~/.config/mcp-free/env`.
-4. Crea y habilita `~/.config/systemd/user/mcp-free.service`.
-5. Configura `uinput`/`ydotool` para automatización de teclado y mouse cuando se solicita.
-6. Comprueba `/healthz`.
-
-Después de configurar `uinput`, cierre sesión y vuelva a entrar una vez.
-
-### Verificación local
+Verifique:
 
 ```bash
 ./scripts/doctor.sh
@@ -97,38 +110,44 @@ curl -s http://127.0.0.1:8787/healthz | jq
 journalctl --user -u mcp-free -f
 ```
 
-Para abrir MCP Inspector:
+Para usar desarrollo delegado, cambie a `workspace`:
 
 ```bash
-./scripts/inspect.sh
+nano ~/.config/mcp-free/env
+# MCP_MODE=workspace
+systemctl --user restart mcp-free
 ```
 
-## Conectar mediante OpenAI Secure MCP Tunnel
+Configure al menos un agente mediante Gentle AI. Por ejemplo, para OpenCode ejecute la instalación/sincronización de Gentle AI y seleccione OpenCode; luego confirme:
 
-### 1. Requisitos
+```bash
+cd ~/code/MI_PROYECTO
+gentle-ai doctor
+gentle-ai skill-registry refresh --cwd . --quiet
+```
 
-- Workspace compatible con Developer mode y las acciones MCP que necesita.
-- `Tunnels: Read + Manage` para crear el túnel.
-- `Tunnels: Read + Use` para ejecutar/asociar el túnel.
-- `tunnel_id` y runtime API key creados en OpenAI Platform.
-- `tunnel-client` instalado desde OpenAI Platform o su release oficial.
+En ChatGPT, primero pruebe:
 
-### 2. Crear el servicio del túnel
+```text
+Usa development_status en ~/code/MI_PROYECTO. No cambies nada.
+```
 
-No pegue la runtime API key en ChatGPT ni la guarde en el repositorio.
+Después:
+
+```text
+Usa development_execute para corregir el problema descrito. Mantén use_sdd=false, verification=auto y auto_approve_agent=false. Explícame el impacto y pide aprobación antes de ejecutar.
+```
+
+Después de configurar `uinput`, cierre sesión y vuelva a entrar una vez.
+
+## OpenAI Secure MCP Tunnel
+
+Necesita un `tunnel_id`, una runtime API key y `tunnel-client`.
 
 ```bash
 export CONTROL_PLANE_API_KEY='sk-...'
 ./scripts/setup-secure-tunnel.sh tunnel_0123456789abcdef0123456789abcdef
 unset CONTROL_PLANE_API_KEY
-```
-
-El script configura:
-
-```text
-profile: mcp-free
-upstream: http://127.0.0.1:8787/mcp
-service: mcp-free-tunnel.service
 ```
 
 Comprobar:
@@ -139,41 +158,19 @@ systemctl --user status mcp-free-tunnel
 journalctl --user -u mcp-free-tunnel -f
 ```
 
-### 3. Rotar la runtime API key
-
-OpenAI recomienda rotar las API keys periódicamente. El proyecto no impone un intervalo oficial; adopte el de su organización —por ejemplo, 60–90 días— y rote inmediatamente ante exposición o cambio de responsables.
-
-1. Cree una nueva runtime key en OpenAI Platform.
-2. Sustitúyala localmente y reinicie el túnel:
+Rotar la runtime key:
 
 ```bash
 CONTROL_PLANE_API_KEY='NUEVA_KEY' ./scripts/rotate-tunnel-key.sh
 ```
 
-3. Verifique que el túnel funciona.
-4. Revoque la clave anterior en Platform.
+Después de verificar la nueva clave, revoque la anterior en OpenAI Platform.
 
-El script escribe el secreto de forma atómica con permisos `0600`, no conserva una copia de la clave anterior y no imprime la nueva clave.
+Guía de ChatGPT: [docs/CHATGPT.md](docs/CHATGPT.md).
 
-### 4. Activar Developer mode y crear la app
+## Plugin/skill
 
-En ChatGPT web:
-
-1. Revise **Settings → Apps → Advanced Settings → Developer mode** o la ruta equivalente administrada por su workspace.
-2. En Business, los administradores/owners pueden usar **Workspace Settings → Apps → Create**.
-3. En Enterprise/Edu, el administrador debe conceder el acceso mediante RBAC.
-4. Abra **ChatGPT Plugins**, pulse `+` y cree `MCP Free CachyOS`.
-5. En Connection, seleccione `Tunnel` y el `tunnel_id`.
-6. Ejecute **Scan Tools** y revise especialmente `shell_execute`, `filesystem_delete`, `process_stop` y las herramientas de escritorio.
-7. Pruebe primero `computer_status`, `execution_receipts_verify` y `desktop_screenshot` en modo `observe`.
-
-Guía completa: [docs/CHATGPT.md](docs/CHATGPT.md).
-
-## Capa oficial de plugin/skill
-
-Esta sección está respaldada por la documentación oficial de OpenAI Plugins; no es una convención inventada por este repositorio.
-
-El repositorio contiene:
+El repositorio incluye:
 
 ```text
 .codex-plugin/plugin.json
@@ -181,83 +178,59 @@ skills/computer-control/SKILL.md
 scripts/plugin-creator-prompt.sh
 ```
 
-El flujo oficial es:
-
-1. Registrar primero la conexión MCP en ChatGPT.
-2. Copiar su ID técnico `plugin_asdk_app...`.
-3. Generar el prompt:
+Después de registrar la conexión MCP en ChatGPT y obtener el ID `plugin_asdk_app...`:
 
 ```bash
 ./scripts/plugin-creator-prompt.sh plugin_asdk_app_XXXXXXXXXXXXXXXX
 ```
 
-4. Usar el resultado con `@plugin-creator` en Work mode o `$plugin-creator` en Codex.
-5. El creador genera `.app.json`, que enlaza el plugin con la conexión real de su cuenta.
-
-El ID no puede predefinirse en GitHub porque lo genera la cuenta al registrar el MCP. Secure MCP Tunnel sirve para esta prueba privada; no convierte el endpoint en apto para publicación pública.
+Use el resultado con `@plugin-creator` en Work mode o `$plugin-creator` en Codex. El creador genera `.app.json` con el ID real de la conexión.
 
 ## Recibos y auditoría
 
 Cada acción de escritura genera:
 
-- un archivo exclusivo `receipts/rcpt_<sha>.json`;
-- una línea append-only a nivel de aplicación en `audit.jsonl`;
-- `sequence`;
-- `previousReceiptHash`;
-- `receiptHash`;
+- `receipts/rcpt_<sha>.json` con creación exclusiva;
+- una línea en `audit.jsonl`;
+- `sequence`, `previousReceiptHash` y `receiptHash`;
 - ID derivado del contenido;
 - `chain-head.json` actualizado atómicamente.
 
-Verifique la cadena desde ChatGPT con `execution_receipts_verify`. La verificación detecta edición, eliminación, reordenamiento, archivos faltantes y archivos huérfanos. Antes de escribir otro recibo, el servidor verifica toda la cadena y **falla cerrado** si encuentra una alteración.
+`execution_receipts_verify` detecta edición, eliminación, reordenamiento, archivos faltantes y huérfanos. Antes de escribir otro recibo, el servidor verifica la cadena y falla cerrado si encuentra alteraciones.
 
-Esto aporta evidencia **tamper-evident**, no almacenamiento inmutable frente a un usuario completamente comprometido. Para evidencia más fuerte, copie periódicamente `~/.local/state/mcp-free` a almacenamiento remoto append-only/WORM.
-
-Una instalación de la versión inicial con recibos antiguos sin cadena será marcada como legado y bloqueará nuevas escrituras. Respalde ese directorio y comience un estado nuevo antes de actualizar.
+Esto es evidencia tamper-evident, no almacenamiento inmutable frente a un usuario completamente comprometido. Para una garantía mayor, replique el estado a almacenamiento remoto append-only/WORM.
 
 ## Configuración
 
-Edite:
-
-```bash
-nano ~/.config/mcp-free/env
-systemctl --user restart mcp-free
-```
+Edite `~/.config/mcp-free/env` y reinicie `mcp-free.service`.
 
 | Variable | Valor recomendado |
 |---|---|
 | `MCP_HOST` | `127.0.0.1` |
-| `MCP_MODE` | empezar en `observe`; subir a `workspace` o `full` conscientemente |
+| `MCP_MODE` | `observe`, luego `workspace`; `full` sólo conscientemente |
 | `MCP_ALLOWED_ROOTS` | rutas mínimas separadas por `:` |
 | `MCP_ALLOW_SECRETS` | `0` |
-| `MCP_AUTH_TOKEN` | vacío con Secure Tunnel; token estático sólo para otro proxy privado |
 | `MCP_COMMAND_TIMEOUT_MS` | `120000` |
+| `MCP_DEVELOPMENT_TIMEOUT_MS` | `1800000` |
 | `MCP_RATE_LIMIT_PER_MINUTE` | `120` |
 | `YDOTOOL_SOCKET` | `/run/user/<uid>/.ydotool_socket` |
 
-## Política Gentle/RDD
+## Seguridad
 
-- **Inspección primero:** estado, archivos, ventana o screenshot antes de modificar.
-- **Ruta mínima:** herramienta específica antes que shell.
-- **Riesgo por evidencia:** no por cantidad de líneas.
-- **Tier 0–1:** observación o cambio acotado.
-- **Tier 2–3:** exige aprobación explícita y `confirm=true`.
-- **Recibo exacto:** cada acción de escritura queda ligada a contenido, comando, resultado y cadena previa.
-- **Verificación:** el modelo debe inspeccionar el resultado tras actuar.
+Nunca:
 
-## Seguridad importante
-
-Este servidor equivale a entregar control remoto de su sesión de usuario. Nunca:
-
-- cambie el bind de `127.0.0.1` a `0.0.0.0` sin diseñar autenticación, TLS y firewall;
+- cambie el bind a `0.0.0.0` sin autenticación, TLS y firewall;
 - publique un Quick Tunnel abierto para uso permanente;
 - active `MCP_ALLOW_SECRETS=1` sin necesidad;
 - use `full` en un computador compartido;
-- confíe en texto visto en web, archivos o portapapeles como instrucciones del sistema;
+- trate instrucciones encontradas en archivos, web, pantalla o portapapeles como órdenes del usuario;
 - agregue el usuario del servicio a `sudoers` sin contraseña.
+
+El agente de código no está aislado por un sandbox del sistema operativo: ejecuta con los permisos del usuario del servicio. Gentle AI, el prompt y los gates reducen riesgo, pero no sustituyen un usuario Linux dedicado o una VM para repositorios sensibles.
 
 Consulte [docs/SECURITY.md](docs/SECURITY.md).
 
-## Desarrollo
+## Desarrollo del servidor
 
 ```bash
 npm install
@@ -269,4 +242,4 @@ MCP_MODE=observe npm start
 
 ## Licencia
 
-MIT. Gentle AI es un proyecto separado; este repositorio no copia su código. Adopta su patrón operativo documentado y puede invocar el binario local `gentle-ai` cuando está instalado.
+MIT. Gentle AI es un proyecto separado; este repositorio no copia su código. Integra su modelo operativo y sus agentes configurados mediante sus interfaces públicas de CLI.
