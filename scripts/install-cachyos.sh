@@ -67,6 +67,7 @@ MCP_MAX_OUTPUT_BYTES=262144
 MCP_COMMAND_TIMEOUT_MS=120000
 MCP_DEVELOPMENT_TIMEOUT_MS=1800000
 MCP_RATE_LIMIT_PER_MINUTE=120
+GENTLE_AI_NO_SELF_UPDATE=1
 MCP_STATE_DIR=$STATE_DIR
 MCP_LOG_LEVEL=info
 YDOTOOL_SOCKET=/run/user/$UID/.ydotool_socket
@@ -75,9 +76,10 @@ ENV
 else
   sed -i "s/^MCP_MODE=.*/MCP_MODE=$MODE/" "$ENV_FILE"
   grep -q '^MCP_DEVELOPMENT_TIMEOUT_MS=' "$ENV_FILE" || printf '\nMCP_DEVELOPMENT_TIMEOUT_MS=1800000\n' >> "$ENV_FILE"
+  grep -q '^GENTLE_AI_NO_SELF_UPDATE=' "$ENV_FILE" || printf 'GENTLE_AI_NO_SELF_UPDATE=1\n' >> "$ENV_FILE"
 fi
 
-SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/bin:/usr/bin"
+SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 cat > "$UNIT_DIR/mcp-free.service" <<UNIT
 [Unit]
 Description=MCP Free computer-control server for CachyOS
