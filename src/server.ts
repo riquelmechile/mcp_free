@@ -96,7 +96,9 @@ async function postHandler(req: Request, res: Response): Promise<void> {
       transport.onclose = () => {
         if (transport?.sessionId) transports.delete(transport.sessionId);
       };
-      await createServer().connect(transport);
+      // SDK 1.29.0 models optional transport callbacks differently under exactOptionalPropertyTypes.
+      // Runtime compatibility is exact; keep the assertion isolated at the SDK boundary.
+      await createServer().connect(transport as unknown as Parameters<McpServer['connect']>[0]);
     }
 
     if (!transport) {
