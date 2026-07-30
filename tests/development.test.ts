@@ -12,14 +12,21 @@ import {
 } from '../src/core/development.js';
 
 const states: DevelopmentAgentState[] = [
-  { id: 'opencode', executable: 'opencode', available: true, gentleConfigured: true, configurationEvidence: ['/tmp/opencode.json'] },
-  { id: 'codex', executable: 'codex', available: true, gentleConfigured: true, configurationEvidence: ['/tmp/AGENTS.md'] },
-  { id: 'claude', executable: 'claude', available: false, gentleConfigured: false, configurationEvidence: [] },
-  { id: 'gemini', executable: 'gemini', available: false, gentleConfigured: false, configurationEvidence: [] }
+  { id: 'opencode', gentleAgentId: 'opencode', executable: 'opencode', available: true, recordedByGentle: true, gentleConfigured: true, configurationEvidence: ['/tmp/opencode.json'] },
+  { id: 'codex', gentleAgentId: 'codex', executable: 'codex', available: true, recordedByGentle: true, gentleConfigured: true, configurationEvidence: ['/tmp/AGENTS.md'] },
+  { id: 'claude', gentleAgentId: 'claude-code', executable: 'claude', available: false, recordedByGentle: false, gentleConfigured: false, configurationEvidence: [] },
+  { id: 'gemini', gentleAgentId: 'gemini-cli', executable: 'gemini', available: false, recordedByGentle: false, gentleConfigured: false, configurationEvidence: [] }
 ];
 
 test('auto prefers a Gentle-configured OpenCode agent', () => {
   assert.equal(chooseDevelopmentAgent(states, 'auto').id, 'opencode');
+});
+
+test('rejects an installed agent that is absent from Gentle state', () => {
+  const unrecorded: DevelopmentAgentState[] = [
+    { id: 'opencode', gentleAgentId: 'opencode', executable: 'opencode', available: true, recordedByGentle: false, gentleConfigured: false, configurationEvidence: ['/tmp/opencode.json'] }
+  ];
+  assert.throws(() => chooseDevelopmentAgent(unrecorded, 'auto'), /not recorded by Gentle AI/);
 });
 
 test('OpenCode invocation selects gentle-orchestrator and gates auto approval', () => {
