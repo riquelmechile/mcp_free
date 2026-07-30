@@ -1,8 +1,8 @@
 {
   "name": "mcp-free-cachyos",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "MCP server for ChatGPT-native computer control and development orchestration on CachyOS through OpenAI Secure MCP Tunnel.",
+  "description": "MCP server for ChatGPT-native computer control and persistent three-lane development orchestration on CachyOS through OpenAI Secure MCP Tunnel.",
   "type": "module",
   "engines": {
     "node": ">=22"
