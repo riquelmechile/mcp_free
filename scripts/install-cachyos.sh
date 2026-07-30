@@ -77,6 +77,7 @@ else
   grep -q '^MCP_DEVELOPMENT_TIMEOUT_MS=' "$ENV_FILE" || printf '\nMCP_DEVELOPMENT_TIMEOUT_MS=1800000\n' >> "$ENV_FILE"
 fi
 
+SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/bin:/usr/bin"
 cat > "$UNIT_DIR/mcp-free.service" <<UNIT
 [Unit]
 Description=MCP Free computer-control server for CachyOS
@@ -88,6 +89,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$ROOT_DIR
 EnvironmentFile=$ENV_FILE
+Environment=PATH=$SERVICE_PATH
 ExecStart=$(command -v node) $ROOT_DIR/dist/server.js
 Restart=on-failure
 RestartSec=3
@@ -118,5 +120,6 @@ echo
 echo "Installed in mode: $MODE"
 echo "Config: $ENV_FILE"
 echo "Logs: journalctl --user -u mcp-free -f"
-echo "Development: configure an agent with Gentle AI, then call development_status before development_execute."
+echo "Development setup: ./scripts/setup-gentle-development.sh opencode ~/code/MI_PROYECTO"
+echo "Then restart mcp-free.service and call development_status before development_execute."
 echo "Next: create an OpenAI Secure MCP Tunnel and run ./scripts/setup-secure-tunnel.sh"
