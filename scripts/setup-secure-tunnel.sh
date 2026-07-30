@@ -6,6 +6,7 @@ TUNNEL_ID="${1:-${TUNNEL_ID:-}}"
 API_KEY="${CONTROL_PLANE_API_KEY:-}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mcp-free"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+ENV_FILE="$CONFIG_DIR/tunnel.env"
 
 if [[ -z "$TUNNEL_ID" ]]; then
   echo "Usage: CONTROL_PLANE_API_KEY=sk-... $0 tunnel_..." >&2
@@ -20,10 +21,15 @@ if ! command -v tunnel-client >/dev/null 2>&1; then
   exit 1
 fi
 
+umask 077
 mkdir -p "$CONFIG_DIR" "$UNIT_DIR"
 chmod 700 "$CONFIG_DIR"
-printf 'CONTROL_PLANE_API_KEY=%s\n' "$API_KEY" > "$CONFIG_DIR/tunnel.env"
-chmod 600 "$CONFIG_DIR/tunnel.env"
+TEMP_ENV="$(mktemp "$CONFIG_DIR/tunnel.env.XXXXXX")"
+trap 'rm -f "$TEMP_ENV"' EXIT
+printf 'CONTROL_PLANE_API_KEY=%s\n' "$API_KEY" > "$TEMP_ENV"
+chmod 600 "$TEMP_ENV"
+mv -f "$TEMP_ENV" "$ENV_FILE"
+trap - EXIT
 
 tunnel-client init \
   --sample sample_mcp_stdio_local \
@@ -42,7 +48,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=$CONFIG_DIR/tunnel.env
+EnvironmentFile=$ENV_FILE
 ExecStart=$(command -v tunnel-client) run --profile $PROFILE
 Restart=always
 RestartSec=5
@@ -62,3 +68,4 @@ sleep 2
 systemctl --user --no-pager --full status mcp-free-tunnel.service || true
 
 echo "Tunnel service enabled. In ChatGPT developer mode, create an app, choose Connection: Tunnel, and select/paste: $TUNNEL_ID"
+echo "Rotate the runtime key periodically with: CONTROL_PLANE_API_KEY='NEW_KEY' ./scripts/rotate-tunnel-key.sh"
