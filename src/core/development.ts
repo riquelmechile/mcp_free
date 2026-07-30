@@ -383,6 +383,8 @@ export async function applyOrchestrationPatch(id: string, patchText: string, all
   return withOrchestrationLock(id, async () => {
     const state = await loadOrchestration(id);
     if (state.status !== 'active') throw new Error(`Patch application requires active status; current status is ${state.status}`);
+    const missingReports = state.lanes.filter(lane => !lane.report).map(lane => lane.id);
+    if (missingReports.length > 0) throw new Error(`ChatGPT must synthesize every configured lane before applying code: ${missingReports.join(', ')}`);
     const before = await captureGitSnapshot(state.root);
     if (before.head !== state.baseline.head || before.branch !== state.baseline.branch) throw new Error('Git branch or HEAD changed after orchestration start');
     if (before.status !== state.baseline.status) throw new Error('Worktree changed after orchestration start; inspect and start a new orchestration to avoid overwriting concurrent work');
