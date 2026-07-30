@@ -243,7 +243,7 @@ async function executeLane(orchestrationId: string, laneId: string): Promise<voi
     if (!record || record.status !== 'queued') return;
     record.status = 'running';
     record.startedAt = new Date().toISOString();
-    record.error = undefined;
+    delete record.error;
     await saveCoordinator(coordinator, orchestration.lanes.length);
   });
   if (!record || record.status !== 'running') return;
