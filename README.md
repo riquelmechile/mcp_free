@@ -5,8 +5,10 @@ Servidor **Model Context Protocol (MCP)** para conectar ChatGPT con un computado
 Para desarrollo, **ChatGPT es el único modelo y el orquestador**. MCP Free no lanza OpenCode, Codex, Claude Code, Gemini, Ollama ni otro LLM. Implementa localmente un flujo inspirado en Gentle AI:
 
 ```text
-inspeccionar → dividir → explorar en paralelo → sintetizar → aplicar → verificar → finalizar
+inspeccionar → dividir → despachar → observar → sintetizar → aplicar → verificar → finalizar
 ```
+
+La versión 0.4.0 incorpora un coordinador persistente: `development_parallel_inspect` encola hasta tres workers y devuelve inmediatamente; `mcp-free.service` continúa ejecutándolos y guardando progreso después de cada comando.
 
 Los recibos son tamper-evident mediante una cadena SHA-256. No se presentan como almacenamiento físicamente inmutable.
 
@@ -15,8 +17,8 @@ Los recibos son tamper-evident mediante una cadena SHA-256. No se presentan como
 - Secure MCP Tunnel mantiene el servidor privado en `127.0.0.1`; `tunnel-client` crea una conexión HTTPS saliente.
 - El soporte MCP completo con escritura está documentado para ChatGPT Business, Enterprise y Edu en web.
 - ChatGPT Pro está documentado para MCP personalizado de lectura/obtención; Plus no figura oficialmente con escritura MCP completa.
-- Una app MCP puede permitir orquestaciones complejas, pero el protocolo no puede crear por sí solo copias independientes de ChatGPT.
-- El multi-agent real de GPT-5.6 está documentado como beta de la Responses API, no como una garantía de las apps MCP dentro de una conversación normal de ChatGPT.
+- Una app MCP puede permitir orquestaciones complejas, pero el protocolo no crea por sí solo copias independientes de ChatGPT.
+- ChatGPT no permanece razonando en segundo plano. Quien queda activo es el coordinador local del MCP.
 
 Documentación oficial:
 
@@ -25,7 +27,7 @@ Documentación oficial:
 - <https://developers.openai.com/api/docs/guides/latest-model>
 - <https://developers.openai.com/plugins/build/plugins>
 
-El endpoint local es:
+Endpoint local:
 
 ```text
 http://127.0.0.1:8787/mcp
@@ -38,7 +40,7 @@ http://127.0.0.1:8787/mcp
 - Estado de CachyOS y sesión gráfica.
 - Lectura y búsqueda de archivos.
 - Procesos, ventanas, portapapeles y capturas.
-- `development_status` y lectura de orquestaciones.
+- `development_status`, estados de orquestación y resultados de carriles.
 - Lectura y verificación de recibos.
 
 ### `workspace`
@@ -65,18 +67,32 @@ Son **tres carriles lógicos del mismo ChatGPT**, no tres modelos:
 2. `design`: solución mínima, interfaces y pruebas;
 3. `review`: revisión adversarial de seguridad y regresiones.
 
-Cada carril conserva brief, comandos, resultados y reporte. `development_parallel_inspect` ejecuta los comandos locales de hasta tres carriles simultáneamente. ChatGPT interpreta cada carril y realiza la síntesis central.
+Los workers locales sí corren de forma concurrente y persistente. ChatGPT entra y sale del ciclo mediante herramientas de observación y conserva la síntesis central.
+
+```text
+ChatGPT: dispatch
+     │
+     └── MCP responde de inmediato
+           ├── lane-1 queued/running/completed
+           ├── lane-2 queued/running/completed
+           └── lane-3 queued/running/completed
+
+ChatGPT: status/wait → lane_result → lane_report
+```
+
+El progreso vive en:
+
+```text
+~/.local/state/mcp-free/orchestration-workers/<orchestration_id>/workers.json
+```
+
+Estados: `queued`, `running`, `completed`, `failed` e `interrupted`. Tras un reinicio, un worker inconcluso queda `interrupted` y debe reencolarse; nunca se informa como exitoso.
 
 ### Herramientas
 
 #### `development_status`
 
-Disponible en `observe`. Devuelve:
-
-- raíz Git, rama, HEAD y cambios existentes;
-- archivos de contexto (`AGENTS.md`, `README.md`, `.atl/skill-registry.md`, etc.);
-- verificaciones detectadas;
-- política explícita: `reasoningModel=ChatGPT`, `externalModelLaunchers=false`, máximo tres carriles.
+Disponible en `observe`. Devuelve raíz Git, rama, HEAD, cambios existentes, archivos de contexto, verificaciones detectadas y el contrato `reasoningModel=ChatGPT`, `externalModelLaunchers=false`, máximo tres carriles.
 
 #### `development_orchestration_start`
 
@@ -84,29 +100,42 @@ Congela el baseline Git y crea entre uno y tres carriles. No modifica el proyect
 
 #### `development_parallel_inspect`
 
-Ejecuta en paralelo comandos de lectura diferentes por carril. Bloquea comandos mutantes, escapes de ruta y rutas con apariencia de credenciales.
+Valida, encola y devuelve inmediatamente. El coordinador residente ejecuta como máximo tres workers y persiste progreso después de cada comando.
+
+#### `development_orchestration_status`
+
+Devuelve al instante el estado central y las listas de workers en cola, ejecución, completados, fallidos o interrumpidos.
+
+#### `development_orchestration_wait`
+
+Long-poll acotado por revisión. Espera hasta 30 segundos por un cambio sin detener los workers.
+
+#### `development_lane_result`
+
+Lee el estado y los resultados de un carril, o un comando específico. Permite procesar un carril completado mientras los otros continúan.
 
 #### `development_lane_report`
 
-Guarda por separado la síntesis de ChatGPT para cada carril. No se puede aplicar el parche hasta que todos los carriles configurados tengan reporte.
+Guarda la síntesis de ChatGPT para un carril `completed`. Puede llamarse antes de que terminen los otros.
 
 #### `development_apply_patch`
 
 Aplica un único parche Git generado por ChatGPT:
 
+- exige que todos los workers estén `completed` y todos los reportes existan;
 - requiere `confirm=true`;
-- exige que rama, HEAD y estado no hayan cambiado desde el inicio;
-- ejecuta `git apply --check` antes de escribir;
+- verifica rama, HEAD y estado inicial;
+- ejecuta `git apply --check`;
 - protege archivos previamente sucios;
-- registra hash SHA-256 y rutas afectadas.
+- registra SHA-256 y rutas afectadas.
 
 #### `development_verify`
 
-Ejecuta `git diff --check` y verificaciones detectadas o explícitas. Como tests/builds ejecutan código del repositorio, requiere otra aprobación con `confirm=true`.
+Ejecuta `git diff --check` y verificaciones aprobadas. Como tests/builds ejecutan código del repositorio, requiere otra aprobación con `confirm=true`.
 
 #### `development_finalize`
 
-Sólo finaliza cuando todos los carriles reportaron, la verificación pasó y la identidad Git sigue intacta.
+Sólo finaliza cuando los carriles están completos y reportados, la verificación pasó y los bytes del worktree siguen coincidiendo con el fingerprint verificado.
 
 Guía completa: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
@@ -116,19 +145,20 @@ Guía completa: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 Actúa tú como orquestador de desarrollo en ~/code/Msl.
 No uses OpenCode, Codex, Claude, Gemini ni ningún otro modelo.
 
-1. Ejecuta development_status.
-2. Crea tres carriles: exploración, diseño y revisión adversarial.
-3. Ejecuta sus inspecciones locales en paralelo.
-4. Registra cada reporte por separado.
-5. Sintetiza tú mismo un parche mínimo.
-6. Explícame archivos y riesgos y pide aprobación antes de aplicarlo.
-7. Pide aprobación antes de ejecutar tests/builds.
-8. Finaliza y entrégame todos los receipts.
+1. Ejecuta development_status e inicia tres carriles.
+2. Despáchalos con development_parallel_inspect; esa llamada debe volver inmediatamente.
+3. Conserva el revision y usa development_orchestration_wait/status para seguir el progreso.
+4. Cuando un carril quede completed, lee development_lane_result y registra su development_lane_report aunque los otros sigan running.
+5. Reencola cualquier carril failed o interrupted.
+6. No apliques nada hasta tener tres workers completed y tres reportes.
+7. Sintetiza tú mismo un parche mínimo.
+8. Pide aprobación para aplicarlo y otra para tests/builds.
+9. Finaliza y entrega todos los receipts.
 
 No hagas commit ni push.
 ```
 
-`use_sdd=true` sólo cambia el método de ChatGPT: exige propuesta, especificación, diseño y tareas durables antes del parche. No inicia otro agente.
+`use_sdd=true` exige propuesta, especificación, diseño y tareas durables antes del parche. No inicia otro agente.
 
 ## Instalación en CachyOS
 
@@ -146,6 +176,17 @@ curl -s http://127.0.0.1:8787/healthz | jq
 journalctl --user -u mcp-free -f
 ```
 
+La salud de 0.4.0 informa:
+
+```json
+{
+  "reasoningModel": "ChatGPT",
+  "externalModels": false,
+  "persistentLaneCoordinator": true,
+  "maximumParallelLanes": 3
+}
+```
+
 Después cambie a `workspace`:
 
 ```bash
@@ -153,9 +194,7 @@ sed -i 's/^MCP_MODE=.*/MCP_MODE=workspace/' ~/.config/mcp-free/env
 systemctl --user restart mcp-free.service
 ```
 
-No necesita instalar Gentle AI ni autenticar otro agente para usar el flujo nativo.
-
-Después de actualizar las herramientas del MCP, use **Refresh/Scan Tools** o vuelva a crear la app según los controles de su workspace: ChatGPT utiliza una instantánea aprobada de las herramientas.
+No necesita instalar Gentle AI ni autenticar otro agente. Tras actualizar el MCP use **Refresh/Scan Tools** para aprobar las herramientas nuevas.
 
 ## OpenAI Secure MCP Tunnel
 
@@ -193,7 +232,7 @@ skills/computer-control/SKILL.md
 scripts/plugin-creator-prompt.sh
 ```
 
-La skill obliga a mantener a ChatGPT como único modelo, usar carriles separados, pedir aprobación para el parche y la ejecución de scripts, y finalizar sólo con evidencia.
+La skill mantiene a ChatGPT como único modelo, define el ciclo dispatch/status/wait/result/report, exige aprobación para parche y scripts, y finaliza sólo con evidencia.
 
 ## Recibos y auditoría
 
@@ -249,4 +288,4 @@ MCP_MODE=observe npm start
 
 ## Licencia
 
-MIT. Gentle AI es un proyecto separado. MCP Free adopta ideas operativas documentadas, pero la versión 0.3.0 no necesita su binario ni sus modelos/agentes para el flujo de desarrollo.
+MIT. Gentle AI es un proyecto separado. MCP Free adopta ideas operativas documentadas, pero la versión 0.4.0 no necesita su binario ni sus modelos/agentes.
