@@ -3,20 +3,28 @@ import path from 'node:path';
 import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
 
-function truncate(value: string): string {
+function truncate(value: string, limitBytes: number): string {
   const bytes = Buffer.byteLength(value);
-  if (bytes <= config.maxOutputBytes) return value;
-  return `${value.slice(0, Math.max(0, config.maxOutputBytes - 200))}\n...[output truncated; ${bytes} bytes total]`;
+  if (bytes <= limitBytes) return value;
+  return `${value.slice(0, Math.max(0, limitBytes - 200))}\n...[output truncated; ${bytes} bytes total]`;
 }
 
 export async function runCommand(
   argv: string[],
-  options: { cwd?: string; timeoutMs?: number; maxTimeoutMs?: number; env?: Record<string, string>; stdin?: string } = {}
+  options: {
+    cwd?: string;
+    timeoutMs?: number;
+    maxTimeoutMs?: number;
+    maxOutputBytes?: number;
+    env?: Record<string, string>;
+    stdin?: string;
+  } = {}
 ): Promise<CommandResult> {
   if (argv.length === 0) throw new Error('argv must not be empty');
   const cwd = path.resolve(options.cwd ?? config.home);
   const maxTimeoutMs = options.maxTimeoutMs ?? 15 * 60_000;
   const timeoutMs = Math.min(options.timeoutMs ?? config.commandTimeoutMs, maxTimeoutMs);
+  const maxOutputBytes = Math.min(options.maxOutputBytes ?? config.maxOutputBytes, 16 * 1024 * 1024);
   const started = Date.now();
 
   return await new Promise<CommandResult>((resolve, reject) => {
@@ -52,8 +60,8 @@ export async function runCommand(
         cwd,
         exitCode,
         signal,
-        stdout: truncate(stdout),
-        stderr: truncate(stderr),
+        stdout: truncate(stdout, maxOutputBytes),
+        stderr: truncate(stderr, maxOutputBytes),
         timedOut,
         durationMs: Date.now() - started
       });
