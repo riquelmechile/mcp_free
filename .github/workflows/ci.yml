@@ -20,7 +20,7 @@ jobs:
       - name: Check
         run: npm run check > ci-log.txt 2>&1
       - name: Upload diagnostic log
-        if: always()
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
           name: ci-log
