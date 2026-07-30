@@ -10,8 +10,10 @@ export type DevelopmentAgentPreference = DevelopmentAgent | 'auto';
 
 export interface DevelopmentAgentState {
   id: DevelopmentAgent;
+  gentleAgentId: string;
   executable: string;
   available: boolean;
+  recordedByGentle: boolean;
   gentleConfigured: boolean;
   configurationEvidence: string[];
 }
@@ -22,6 +24,14 @@ export interface GitSnapshot {
   head: string | null;
   status: string;
   diffStat: string;
+}
+
+interface GentleInstallState {
+  path: string;
+  readable: boolean;
+  installedAgents: string[];
+  pendingSync: boolean;
+  error: string | null;
 }
 
 export interface GentleProjectState {
@@ -35,6 +45,11 @@ export interface GentleProjectState {
     reviewModeExitCode: number | null;
     reviewModeOutput: string | null;
     skillRegistryPresent: boolean;
+    statePath: string;
+    stateReadable: boolean;
+    stateError: string | null;
+    installedAgents: string[];
+    pendingSync: boolean;
   };
   agents: DevelopmentAgentState[];
   recommendedAgent: DevelopmentAgent | null;
@@ -53,6 +68,13 @@ const AGENT_EXECUTABLE: Record<DevelopmentAgent, string> = {
   codex: 'codex',
   claude: 'claude',
   gemini: 'gemini'
+};
+
+const GENTLE_AGENT_ID: Record<DevelopmentAgent, string> = {
+  opencode: 'opencode',
+  codex: 'codex',
+  claude: 'claude-code',
+  gemini: 'gemini-cli'
 };
 
 async function exists(target: string): Promise<boolean> {
@@ -76,6 +98,31 @@ function cleanOutput(result: CommandResult): string {
   return `${result.stdout}\n${result.stderr}`.trim();
 }
 
+async function readGentleInstallState(): Promise<GentleInstallState> {
+  const statePath = path.join(config.home, '.gentle-ai', 'state.json');
+  try {
+    const parsed = JSON.parse(await fs.readFile(statePath, 'utf8')) as Record<string, unknown>;
+    const installedAgents = Array.isArray(parsed.installed_agents)
+      ? parsed.installed_agents.filter((value): value is string => typeof value === 'string')
+      : [];
+    return {
+      path: statePath,
+      readable: true,
+      installedAgents,
+      pendingSync: parsed.pending_sync === true,
+      error: null
+    };
+  } catch (error) {
+    return {
+      path: statePath,
+      readable: false,
+      installedAgents: [],
+      pendingSync: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 export async function captureGitSnapshot(cwd: string): Promise<GitSnapshot> {
   const rootResult = await runCommand(['git', 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: 10_000 });
   if (rootResult.exitCode !== 0) throw new Error(`Development orchestration requires a Git worktree: ${cleanOutput(rootResult)}`);
@@ -95,9 +142,11 @@ export async function captureGitSnapshot(cwd: string): Promise<GitSnapshot> {
   };
 }
 
-async function detectAgentState(id: DevelopmentAgent, cwd: string): Promise<DevelopmentAgentState> {
+async function detectAgentState(id: DevelopmentAgent, cwd: string, installedAgents: Set<string>): Promise<DevelopmentAgentState> {
   const executable = AGENT_EXECUTABLE[id];
+  const gentleAgentId = GENTLE_AGENT_ID[id];
   const available = await commandExists(executable);
+  const recordedByGentle = installedAgents.has(gentleAgentId);
   const evidence: string[] = [];
 
   if (id === 'opencode') {
@@ -112,7 +161,8 @@ async function detectAgentState(id: DevelopmentAgent, cwd: string): Promise<Deve
     }
   } else if (id === 'codex') {
     for (const candidate of [path.join(cwd, 'AGENTS.md'), path.join(config.home, '.codex', 'AGENTS.md')]) {
-      if (await exists(candidate)) evidence.push(candidate);
+      const text = await readText(candidate);
+      if (text && /gentle|receipt-driven|sdd/i.test(text)) evidence.push(candidate);
     }
   } else if (id === 'claude') {
     for (const candidate of [path.join(cwd, 'CLAUDE.md'), path.join(config.home, '.claude', 'CLAUDE.md'), path.join(config.home, '.claude', 'skills')]) {
@@ -124,30 +174,43 @@ async function detectAgentState(id: DevelopmentAgent, cwd: string): Promise<Deve
     }
   }
 
-  return { id, executable, available, gentleConfigured: evidence.length > 0, configurationEvidence: evidence };
+  return {
+    id,
+    gentleAgentId,
+    executable,
+    available,
+    recordedByGentle,
+    gentleConfigured: recordedByGentle && evidence.length > 0,
+    configurationEvidence: evidence
+  };
 }
 
 export function chooseDevelopmentAgent(states: DevelopmentAgentState[], preference: DevelopmentAgentPreference): DevelopmentAgentState {
   if (preference !== 'auto') {
     const selected = states.find(state => state.id === preference);
     if (!selected?.available) throw new Error(`Requested development agent is not installed: ${preference}`);
+    if (!selected.recordedByGentle) {
+      throw new Error(`Agent ${preference} is not recorded in ~/.gentle-ai/state.json. Run gentle-ai install --agent ${GENTLE_AGENT_ID[preference]} or sync the existing Gentle installation.`);
+    }
     if (!selected.gentleConfigured) {
-      const gentleId = preference === 'claude' ? 'claude-code' : preference === 'gemini' ? 'gemini-cli' : preference;
-      throw new Error(`Agent ${preference} is installed but no Gentle AI configuration was detected. Run gentle-ai sync --agent ${gentleId}.`);
+      throw new Error(`Agent ${preference} is recorded by Gentle AI but its managed configuration evidence is missing. Run gentle-ai sync --agent ${GENTLE_AGENT_ID[preference]}.`);
     }
     return selected;
   }
 
   const configured = states.find(state => state.available && state.gentleConfigured);
   if (configured) return configured;
+  const recorded = states.find(state => state.available && state.recordedByGentle);
+  if (recorded) throw new Error(`Agent ${recorded.id} is recorded by Gentle AI but its managed files are incomplete. Run gentle-ai sync --agent ${recorded.gentleAgentId}.`);
   const available = states.find(state => state.available);
-  if (available) throw new Error(`Agent ${available.id} is installed but Gentle AI configuration was not detected. Run gentle-ai sync for that agent first.`);
+  if (available) throw new Error(`Agent ${available.id} is installed but is not recorded by Gentle AI. Run gentle-ai install --agent ${available.gentleAgentId}.`);
   throw new Error('No supported development agent is installed. Install OpenCode, Codex, Claude Code, or Gemini CLI, then configure it with Gentle AI.');
 }
 
 export async function inspectGentleProject(cwd: string): Promise<GentleProjectState> {
   const git = await captureGitSnapshot(cwd);
   const installed = await commandExists('gentle-ai');
+  const installState = await readGentleInstallState();
   let version: CommandResult | null = null;
   let doctor: CommandResult | null = null;
   let reviewMode: CommandResult | null = null;
@@ -160,7 +223,8 @@ export async function inspectGentleProject(cwd: string): Promise<GentleProjectSt
     ]);
   }
 
-  const agents = await Promise.all(DEVELOPMENT_AGENTS.map(agent => detectAgentState(agent, git.root)));
+  const installedAgents = new Set(installState.installedAgents);
+  const agents = await Promise.all(DEVELOPMENT_AGENTS.map(agent => detectAgentState(agent, git.root, installedAgents)));
   const recommendedAgent = agents.find(agent => agent.available && agent.gentleConfigured)?.id ?? null;
   return {
     cwd: git.root,
@@ -172,7 +236,12 @@ export async function inspectGentleProject(cwd: string): Promise<GentleProjectSt
       doctorOutput: doctor ? cleanOutput(doctor) || null : null,
       reviewModeExitCode: reviewMode?.exitCode ?? null,
       reviewModeOutput: reviewMode ? cleanOutput(reviewMode) || null : null,
-      skillRegistryPresent: await exists(path.join(git.root, '.atl', 'skill-registry.md'))
+      skillRegistryPresent: await exists(path.join(git.root, '.atl', 'skill-registry.md')),
+      statePath: installState.path,
+      stateReadable: installState.readable,
+      stateError: installState.error,
+      installedAgents: installState.installedAgents,
+      pendingSync: installState.pendingSync
     },
     agents,
     recommendedAgent
