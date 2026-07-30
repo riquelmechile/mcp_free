@@ -9,10 +9,19 @@ import {
   inspectProjectDevelopment,
   loadOrchestration,
   recordLaneReport,
-  runParallelInspection,
   validateVerificationCommand,
   verifyOrchestration
 } from '../core/development.js';
+import {
+  assertAllLanesCompleted,
+  enqueueParallelInspection,
+  getCoordinatorState,
+  getLaneWorker,
+  materializeLaneInspection,
+  requireLaneCompleted,
+  summarizeCoordinator,
+  waitForCoordinatorChange
+} from '../core/lane-coordinator.js';
 import { assertWorkspaceCwd, resolveAllowedPath } from '../core/paths.js';
 import { requireConfirmation } from '../core/policy.js';
 import { verifyReceiptChain, writeReceipt } from '../core/receipts.js';
@@ -27,7 +36,7 @@ async function assertHealthyAuditChain(): Promise<void> {
 export function registerDevelopmentTools(server: McpServer, options: { allowExecute: boolean }): void {
   server.registerTool('development_status', {
     title: 'Inspect ChatGPT-native development readiness',
-    description: 'Inspect a Git project and return local context, existing changes, verification commands, and the three-lane orchestration contract. ChatGPT is the sole reasoning model; this tool never launches another AI.',
+    description: 'Inspect a Git project and return local context, existing changes, verification commands, and the persistent three-lane orchestration contract. ChatGPT is the sole reasoning model; this tool never launches another AI.',
     inputSchema: { cwd: z.string() },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   }, async ({ cwd }) => {
@@ -36,7 +45,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
       assertWorkspaceCwd(resolvedCwd);
       const state = await inspectProjectDevelopment(resolvedCwd);
       return textResult(
-        `ChatGPT-native orchestration is ready in ${state.root}. Up to three logical lanes can inspect concurrently without launching external models.`,
+        `ChatGPT-native orchestration is ready in ${state.root}. The MCP coordinator can keep up to three local lane workers running after the dispatch call returns.`,
         state as unknown as Record<string, unknown>
       );
     } catch (error) {
@@ -45,14 +54,72 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
   });
 
   server.registerTool('development_orchestration_status', {
-    title: 'Read development orchestration state',
-    description: 'Read one orchestration, its Git baseline, logical lanes, reports, patch state, and independent verification evidence.',
+    title: 'Read persistent development orchestration state',
+    description: 'Read the central orchestration plus a compact coordinator snapshot. This call returns immediately while queued or running lane workers continue in the MCP service.',
     inputSchema: { orchestration_id: z.string() },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   }, async ({ orchestration_id }) => {
     try {
-      const state = await loadOrchestration(orchestration_id);
-      return textResult(`Orchestration ${state.id} is ${state.status}.`, state as unknown as Record<string, unknown>);
+      const [orchestration, coordinator] = await Promise.all([
+        loadOrchestration(orchestration_id),
+        getCoordinatorState(orchestration_id)
+      ]);
+      const summary = summarizeCoordinator(coordinator);
+      return textResult(
+        `Orchestration ${orchestration.id} is ${orchestration.status}; lane coordinator is ${summary.status} at revision ${summary.revision}.`,
+        { orchestration, coordinator: summary } as unknown as Record<string, unknown>
+      );
+    } catch (error) {
+      return errorResult(error);
+    }
+  });
+
+  server.registerTool('development_orchestration_wait', {
+    title: 'Wait for the next lane coordinator change',
+    description: 'Long-poll for at most 30 seconds until a lane starts, advances, completes, fails, or is interrupted. Background lane workers continue independently of this request.',
+    inputSchema: {
+      orchestration_id: z.string(),
+      after_revision: z.number().int().min(0).default(0),
+      wait_ms: z.number().int().min(0).max(30_000).default(15_000)
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+  }, async ({ orchestration_id, after_revision, wait_ms }) => {
+    try {
+      const coordinator = await waitForCoordinatorChange(orchestration_id, after_revision, wait_ms);
+      const summary = summarizeCoordinator(coordinator);
+      return textResult(
+        `Lane coordinator revision is ${summary.revision}; status is ${summary.status}.`,
+        summary as unknown as Record<string, unknown>
+      );
+    } catch (error) {
+      return errorResult(error);
+    }
+  });
+
+  server.registerTool('development_lane_result', {
+    title: 'Read one lane worker result',
+    description: 'Read persisted commands, progress, outputs, and errors for one logical lane while other lanes may still be running.',
+    inputSchema: {
+      orchestration_id: z.string(),
+      lane_id: z.string(),
+      command_index: z.number().int().min(0).optional()
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+  }, async ({ orchestration_id, lane_id, command_index }) => {
+    try {
+      const lane = await getLaneWorker(orchestration_id, lane_id);
+      if (command_index !== undefined) {
+        const result = lane.results[command_index];
+        if (!result) throw new Error(`No result exists at command_index ${command_index}; available results: ${lane.results.length}`);
+        return textResult(
+          `Lane ${lane_id} command ${command_index + 1}/${lane.totalCommands} is available.`,
+          { laneId: lane.laneId, status: lane.status, commandIndex: command_index, result } as unknown as Record<string, unknown>
+        );
+      }
+      return textResult(
+        `Lane ${lane_id} is ${lane.status} with ${lane.results.length}/${lane.totalCommands} command result(s).`,
+        lane as unknown as Record<string, unknown>
+      );
     } catch (error) {
       return errorResult(error);
     }
@@ -98,8 +165,8 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
   });
 
   server.registerTool('development_parallel_inspect', {
-    title: 'Inspect up to three development lanes in parallel',
-    description: 'Run read-only local inspection commands for one to three logical lanes concurrently. The lanes are not AI models: ChatGPT defines their briefs, interprets their evidence, and synthesizes the result.',
+    title: 'Queue up to three persistent lane workers',
+    description: 'Validate and enqueue read-only local inspection commands for one to three lanes, then return immediately. A resident MCP coordinator runs at most three workers concurrently and persists progress after every command.',
     inputSchema: {
       orchestration_id: z.string(),
       lanes: z.array(z.object({
@@ -114,24 +181,32 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
     const started = Date.now();
     try {
       await assertHealthyAuditChain();
-      const state = await runParallelInspection(
+      const coordinator = await enqueueParallelInspection(
         orchestration_id,
         lanes.map(lane => ({ laneId: lane.lane_id, commands: lane.commands })),
         timeout_ms
       );
+      const summary = summarizeCoordinator(coordinator);
       const receipt = await writeReceipt({
         action: 'development_parallel_inspect',
         riskTier: 0,
         success: true,
         durationMs: Date.now() - started,
         requestId: request_id,
-        target: state.root,
-        output: JSON.stringify(state.lanes.map(lane => ({ id: lane.id, role: lane.role, inspection: lane.inspection }))),
-        details: { orchestrationId: state.id, parallelLaneCount: lanes.length, externalModels: false }
+        target: coordinator.root,
+        output: JSON.stringify(summary),
+        details: {
+          orchestrationId: coordinator.orchestrationId,
+          queuedLaneCount: lanes.length,
+          revision: summary.revision,
+          persistentCoordinator: true,
+          maximumConcurrentWorkers: 3,
+          externalModels: false
+        }
       });
       return textResult(
-        `Completed ${lanes.length} local inspection lane(s) concurrently for ${state.id}. Receipt: ${receipt.id}.`,
-        { orchestration: state, receipt } as unknown as Record<string, unknown>
+        `Queued ${lanes.length} lane worker(s) for ${coordinator.orchestrationId}; the MCP coordinator continues after this call returns. Revision: ${summary.revision}. Receipt: ${receipt.id}.`,
+        { coordinator: summary, receipt } as unknown as Record<string, unknown>
       );
     } catch (error) {
       return errorResult(error);
@@ -139,8 +214,8 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
   });
 
   server.registerTool('development_lane_report', {
-    title: 'Record one logical lane report',
-    description: 'Persist ChatGPT’s synthesis for one lane. Call this separately for explorer, designer, and reviewer so their conclusions remain distinct before central synthesis.',
+    title: 'Record one completed logical lane report',
+    description: 'Persist ChatGPT’s synthesis for one completed lane while other workers may continue. The lane must have completed successfully; failed or interrupted lanes must be requeued first.',
     inputSchema: {
       orchestration_id: z.string(),
       lane_id: z.string(),
@@ -155,6 +230,8 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
     const started = Date.now();
     try {
       await assertHealthyAuditChain();
+      const worker = await requireLaneCompleted(orchestration_id, lane_id);
+      await materializeLaneInspection(orchestration_id, lane_id);
       const state = await recordLaneReport(orchestration_id, { laneId: lane_id, summary, findings, recommendations, evidence });
       const lane = state.lanes.find(candidate => candidate.id === lane_id);
       const receipt = await writeReceipt({
@@ -165,9 +242,16 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
         requestId: request_id,
         target: state.root,
         output: JSON.stringify(lane),
-        details: { orchestrationId: state.id, laneId: lane_id, role: lane?.role }
+        details: {
+          orchestrationId: state.id,
+          laneId: lane_id,
+          role: lane?.role,
+          workerAttempt: worker.attempt,
+          workerResultCount: worker.results.length,
+          workerCompletedAt: worker.completedAt
+        }
       });
-      return textResult(`Recorded ${lane_id} for ${state.id}. Receipt: ${receipt.id}.`, { lane, receipt } as unknown as Record<string, unknown>);
+      return textResult(`Recorded completed ${lane_id} for ${state.id}. Other lane workers may still be running. Receipt: ${receipt.id}.`, { lane, receipt } as unknown as Record<string, unknown>);
     } catch (error) {
       return errorResult(error);
     }
@@ -175,7 +259,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
 
   server.registerTool('development_apply_patch', {
     title: 'Apply ChatGPT-synthesized development patch',
-    description: 'Apply one unified Git patch synthesized by ChatGPT after all logical lanes have reported. Refuses concurrent worktree changes, symlink/submodule patches, and pre-existing dirty files unless explicitly approved.',
+    description: 'Apply one unified Git patch synthesized by ChatGPT only after every persistent lane worker completed and every logical lane was reported. Refuses concurrent worktree changes and unsafe patch targets.',
     inputSchema: {
       orchestration_id: z.string(),
       patch: z.string().min(10).max(2_000_000),
@@ -189,6 +273,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
     try {
       requireConfirmation(2, confirm);
       await assertHealthyAuditChain();
+      await assertAllLanesCompleted(orchestration_id);
       const result = await applyOrchestrationPatch(orchestration_id, patch, allow_touch_dirty);
       const receipt = await writeReceipt({
         action: 'development_apply_patch',
@@ -220,7 +305,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
 
   server.registerTool('development_verify', {
     title: 'Independently verify ChatGPT development changes',
-    description: 'Run git diff --check and bounded project verification after a patch. Test/build scripts can execute repository code, so explicit approval is required. Successful verification is bound to the exact worktree and index bytes.',
+    description: 'Run git diff --check and bounded project verification after a patch. Test/build scripts can execute repository code, so explicit approval is required. Successful verification is bound to exact worktree and index bytes.',
     inputSchema: {
       orchestration_id: z.string(),
       verification: z.enum(['auto', 'custom', 'none']).default('auto'),
@@ -278,7 +363,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
 
   server.registerTool('development_finalize', {
     title: 'Finalize verified ChatGPT development orchestration',
-    description: 'Finalize only after every logical lane has reported, independent verification has passed, and the exact worktree/index bytes still match the verified fingerprint.',
+    description: 'Finalize only after every persistent lane worker completed, every logical lane reported, independent verification passed, and exact worktree/index bytes still match the verified fingerprint.',
     inputSchema: {
       orchestration_id: z.string(),
       request_id: z.string().min(8).max(128).optional()
@@ -288,6 +373,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
     const started = Date.now();
     try {
       await assertHealthyAuditChain();
+      await assertAllLanesCompleted(orchestration_id);
       const before = await loadOrchestration(orchestration_id);
       const worktreeFingerprint = await assertVerifiedWorktreeUnchanged(before);
       const state = await finalizeOrchestration(orchestration_id);
@@ -306,6 +392,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
           verificationSuccess: state.verification?.success === true,
           verifiedWorktreeFingerprint: worktreeFingerprint.fingerprint,
           reasoningModel: 'ChatGPT',
+          persistentLaneCoordinator: true,
           externalModels: false
         }
       });
