@@ -74,6 +74,12 @@ test('dispatch returns immediately while three persistent workers finish indepen
     const laneOne = await coordinator.requireLaneCompleted(orchestration.id, 'lane-1');
     assert.equal(laneOne.status, 'completed');
     assert.match(laneOne.results[1]!.stdout, /baseline/);
+
+    const materialized = await coordinator.materializeLaneInspection(orchestration.id, 'lane-1');
+    const centralLane = materialized.lanes.find(lane => lane.id === 'lane-1');
+    assert.equal(centralLane?.inspection?.results.length, 2);
+    assert.deepEqual(centralLane?.inspection?.results, laneOne.results);
+    assert.match(centralLane?.inspection?.results[1]!.stdout ?? '', /baseline/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(stateDir, { recursive: true, force: true });
