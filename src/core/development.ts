@@ -91,6 +91,11 @@ function sha256(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function within(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 async function exists(target: string): Promise<boolean> {
   try {
     await fs.access(target);
@@ -143,12 +148,12 @@ async function withOrchestrationLock<T>(id: string, operation: () => Promise<T>)
 export async function captureGitSnapshot(cwd: string): Promise<GitSnapshot> {
   const rootResult = await runCommand(['git', 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: 10_000 });
   if (rootResult.exitCode !== 0) throw new Error(`Development orchestration requires a Git worktree: ${cleanOutput(rootResult)}`);
-  const root = rootResult.stdout.trim();
+  const root = await fs.realpath(rootResult.stdout.trim());
   const [branch, head, status, diffStat] = await Promise.all([
     runCommand(['git', 'branch', '--show-current'], { cwd: root, timeoutMs: 10_000 }),
     runCommand(['git', 'rev-parse', '--verify', 'HEAD'], { cwd: root, timeoutMs: 10_000 }),
     runCommand(['git', 'status', '--porcelain=v1', '--untracked-files=all'], { cwd: root, timeoutMs: 15_000 }),
-    runCommand(['git', 'diff', '--stat'], { cwd: root, timeoutMs: 15_000 })
+    runCommand(['git', 'diff', '--stat', '--no-ext-diff'], { cwd: root, timeoutMs: 15_000 })
   ]);
   return {
     root,
@@ -188,7 +193,7 @@ export async function detectVerificationCommands(cwd: string): Promise<string[][
       }
       if (scripts.build) commands.push(run('build'));
     } catch {
-      // Invalid package.json is reported by ChatGPT from project inspection.
+      // Invalid package.json is surfaced by project inspection.
     }
   }
   if (await exists(path.join(cwd, 'go.mod'))) commands.push(['go', 'test', './...']);
@@ -261,15 +266,24 @@ async function saveOrchestration(state: OrchestrationState): Promise<void> {
   await writeJsonAtomic(orchestrationPath(state.id), state);
 }
 
-const INSPECTION_EXECUTABLES = new Set(['git', 'rg', 'fd', 'find', 'ls', 'cat', 'grep', 'head', 'tail', 'wc', 'jq', 'stat', 'sed']);
-const READ_ONLY_GIT_SUBCOMMANDS = new Set(['status', 'diff', 'log', 'show', 'grep', 'ls-files', 'rev-parse', 'branch', 'remote', 'tag', 'describe', 'blame']);
+const INSPECTION_EXECUTABLES = new Set(['git', 'rg', 'fd', 'ls', 'cat', 'head', 'tail', 'wc', 'jq', 'stat']);
+const READ_ONLY_GIT_SUBCOMMANDS = new Set(['status', 'diff', 'log', 'show', 'grep', 'ls-files', 'rev-parse', 'describe']);
 const SENSITIVE_ARG = /(^|\/)(\.env(?:\.|$)|\.ssh|\.gnupg|secrets?|credentials?)(\/|$)|\.(?:pem|key)$/i;
+const BLOCKED_GIT_ARGUMENTS = [
+  '--output', '--ext-diff', '--textconv', '--no-index', '--open-files-in-pager',
+  '--exec-path', '--git-dir', '--work-tree', '--config-env'
+];
 
-function assertSafeInspectionArg(argument: string): void {
+function assertSafeArgument(argument: string): void {
+  if (argument.includes('\0')) throw new Error('NUL bytes are not allowed in command arguments');
   if (argument.startsWith('/') || argument.startsWith('~') || argument === '..' || argument.startsWith('../') || argument.includes('/../')) {
-    throw new Error(`Inspection arguments must stay inside the project: ${argument}`);
+    throw new Error(`Arguments must stay inside the project: ${argument}`);
   }
-  if (SENSITIVE_ARG.test(argument)) throw new Error(`Inspection of credential-like paths is blocked: ${argument}`);
+  if (SENSITIVE_ARG.test(argument)) throw new Error(`Credential-like paths are blocked: ${argument}`);
+}
+
+function hasBlockedPrefix(argument: string, blocked: string[]): boolean {
+  return blocked.some(value => argument === value || argument.startsWith(`${value}=`));
 }
 
 export function validateInspectionCommand(argv: string[]): void {
@@ -277,16 +291,50 @@ export function validateInspectionCommand(argv: string[]): void {
   if (argv.length > 100) throw new Error('Inspection command is too long');
   const executable = path.basename(argv[0]!);
   if (!INSPECTION_EXECUTABLES.has(executable)) throw new Error(`Inspection executable is not allowed: ${executable}`);
-  for (const argument of argv.slice(1)) assertSafeInspectionArg(argument);
+  for (const argument of argv.slice(1)) assertSafeArgument(argument);
+
   if (executable === 'git') {
     const subcommand = argv[1];
     if (!subcommand || !READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) throw new Error(`Git subcommand is not read-only: ${subcommand ?? '(missing)'}`);
+    if (argv.some(argument => hasBlockedPrefix(argument, BLOCKED_GIT_ARGUMENTS))) throw new Error('Git argument can write files, escape the worktree, or execute configured helpers');
   }
-  if (executable === 'sed' && argv.some(argument => argument === '-i' || argument.startsWith('-i'))) throw new Error('sed -i is not allowed during inspection');
-  if (executable === 'find' && argv.some(argument => ['-delete', '-exec', '-execdir', '-ok', '-okdir'].includes(argument))) {
-    throw new Error('Mutating find actions are not allowed during inspection');
+  if (executable === 'rg') {
+    const blocked = ['--pre', '--pre-glob', '--follow', '-L'];
+    if (argv.some(argument => hasBlockedPrefix(argument, blocked))) throw new Error('ripgrep preprocessors and symlink following are not allowed');
+  }
+  if (executable === 'fd') {
+    const blocked = ['--exec', '--exec-batch', '-x', '-X', '--follow', '-L'];
+    if (argv.some(argument => hasBlockedPrefix(argument, blocked))) throw new Error('fd execution actions and symlink following are not allowed');
   }
 }
+
+async function assertExistingArgumentsStayInProject(root: string, argv: string[]): Promise<void> {
+  const realRoot = await fs.realpath(root);
+  for (const argument of argv.slice(1)) {
+    if (argument === '-' || argument.startsWith('-')) continue;
+    const candidate = path.resolve(realRoot, argument);
+    if (!within(candidate, realRoot)) throw new Error(`Argument resolves outside project: ${argument}`);
+    let metadata;
+    try {
+      metadata = await fs.lstat(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    if (metadata.isSymbolicLink()) throw new Error(`Explicit symlink arguments are blocked during inspection: ${argument}`);
+    const resolved = await fs.realpath(candidate);
+    if (!within(resolved, realRoot)) throw new Error(`Argument resolves outside project through filesystem links: ${argument}`);
+  }
+}
+
+const INSPECTION_ENV: Record<string, string> = {
+  GIT_PAGER: 'cat',
+  PAGER: 'cat',
+  GIT_OPTIONAL_LOCKS: '0',
+  RIPGREP_CONFIG_PATH: '/dev/null',
+  NO_COLOR: '1',
+  LANG: 'C'
+};
 
 export async function runParallelInspection(id: string, requests: LaneInspectionRequest[], timeoutMs: number): Promise<OrchestrationState> {
   return withOrchestrationLock(id, async () => {
@@ -299,14 +347,22 @@ export async function runParallelInspection(id: string, requests: LaneInspection
       const lane = state.lanes.find(candidate => candidate.id === request.laneId);
       if (!lane) throw new Error(`Unknown lane_id: ${request.laneId}`);
       if (request.commands.length < 1 || request.commands.length > 8) throw new Error('Each lane requires between 1 and 8 inspection commands');
-      request.commands.forEach(validateInspectionCommand);
+      for (const argv of request.commands) {
+        validateInspectionCommand(argv);
+        await assertExistingArgumentsStayInProject(state.root, argv);
+      }
     }
 
     const completed = await Promise.all(requests.map(async request => {
       const startedAt = new Date().toISOString();
       const results: CommandResult[] = [];
       for (const argv of request.commands) {
-        results.push(await runCommand(argv, { cwd: state.root, timeoutMs, maxTimeoutMs: config.developmentTimeoutMs }));
+        results.push(await runCommand(argv, {
+          cwd: state.root,
+          timeoutMs,
+          maxTimeoutMs: config.developmentTimeoutMs,
+          env: INSPECTION_ENV
+        }));
       }
       return { laneId: request.laneId, inspection: { startedAt, completedAt: new Date().toISOString(), results } satisfies LaneInspection };
     }));
@@ -333,6 +389,7 @@ export async function recordLaneReport(id: string, input: {
     if (state.status !== 'active') throw new Error(`Lane reports require active status; current status is ${state.status}`);
     const lane = state.lanes.find(candidate => candidate.id === input.laneId);
     if (!lane) throw new Error(`Unknown lane_id: ${input.laneId}`);
+    if (!lane.inspection) throw new Error(`Lane ${input.laneId} has no inspection evidence to synthesize`);
     lane.report = {
       recordedAt: new Date().toISOString(),
       summary: input.summary,
@@ -356,6 +413,10 @@ export function dirtyPathsFromStatus(status: string): string[] {
 }
 
 export function extractPatchPaths(patchText: string): string[] {
+  if (/^GIT binary patch$/m.test(patchText)) throw new Error('Binary patches are not supported');
+  if (/^(?:new|old) file mode (?:120000|160000)$/m.test(patchText) || /^Subproject commit /m.test(patchText)) {
+    throw new Error('Symlink and submodule patches are not supported');
+  }
   const paths = new Set<string>();
   for (const line of patchText.split('\n')) {
     if (!line.startsWith('+++ ') && !line.startsWith('--- ')) continue;
@@ -366,11 +427,32 @@ export function extractPatchPaths(patchText: string): string[] {
     if (path.isAbsolute(value) || value === '..' || value.startsWith('../') || value.includes('/../')) {
       throw new Error(`Patch path escapes the project: ${value}`);
     }
+    if (value === '.git' || value.startsWith('.git/')) throw new Error('Patches may not modify Git metadata');
     if (SENSITIVE_ARG.test(value)) throw new Error(`Patch targets a credential-like path: ${value}`);
     paths.add(value);
   }
-  if (paths.size === 0) throw new Error('Patch does not contain any file paths');
+  if (paths.size === 0) throw new Error('Patch does not contain any supported file paths');
   return [...paths].sort();
+}
+
+async function assertPatchTargetsSafe(root: string, patchPaths: string[]): Promise<void> {
+  const realRoot = await fs.realpath(root);
+  for (const relative of patchPaths) {
+    let cursor = realRoot;
+    for (const component of relative.split('/').filter(Boolean)) {
+      cursor = path.join(cursor, component);
+      let metadata;
+      try {
+        metadata = await fs.lstat(cursor);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
+        throw error;
+      }
+      if (metadata.isSymbolicLink()) throw new Error(`Patch path crosses an existing symlink: ${relative}`);
+      const resolved = await fs.realpath(cursor);
+      if (!within(resolved, realRoot)) throw new Error(`Patch path resolves outside project: ${relative}`);
+    }
+  }
 }
 
 export async function applyOrchestrationPatch(id: string, patchText: string, allowTouchDirty: boolean): Promise<{
@@ -383,20 +465,21 @@ export async function applyOrchestrationPatch(id: string, patchText: string, all
   return withOrchestrationLock(id, async () => {
     const state = await loadOrchestration(id);
     if (state.status !== 'active') throw new Error(`Patch application requires active status; current status is ${state.status}`);
-    const missingReports = state.lanes.filter(lane => !lane.report).map(lane => lane.id);
-    if (missingReports.length > 0) throw new Error(`ChatGPT must synthesize every configured lane before applying code: ${missingReports.join(', ')}`);
+    const incompleteLanes = state.lanes.filter(lane => !lane.inspection || !lane.report).map(lane => lane.id);
+    if (incompleteLanes.length > 0) throw new Error(`ChatGPT must inspect and synthesize every configured lane before applying code: ${incompleteLanes.join(', ')}`);
     const before = await captureGitSnapshot(state.root);
     if (before.head !== state.baseline.head || before.branch !== state.baseline.branch) throw new Error('Git branch or HEAD changed after orchestration start');
     if (before.status !== state.baseline.status) throw new Error('Worktree changed after orchestration start; inspect and start a new orchestration to avoid overwriting concurrent work');
     const patchPaths = extractPatchPaths(patchText);
+    await assertPatchTargetsSafe(state.root, patchPaths);
     const dirtyPaths = new Set(dirtyPathsFromStatus(state.baseline.status));
     const overlap = patchPaths.filter(candidate => dirtyPaths.has(candidate));
     if (overlap.length > 0 && !allowTouchDirty) {
       throw new Error(`Patch touches pre-existing dirty paths: ${overlap.join(', ')}. Set allow_touch_dirty=true only after reviewing those exact files.`);
     }
-    const check = await runCommand(['git', 'apply', '--check', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 60_000 });
+    const check = await runCommand(['git', 'apply', '--check', '--', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 60_000 });
     if (check.exitCode !== 0 || check.timedOut) throw new Error(`git apply --check failed: ${cleanOutput(check)}`);
-    const apply = await runCommand(['git', 'apply', '--whitespace=nowarn', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 120_000 });
+    const apply = await runCommand(['git', 'apply', '--whitespace=nowarn', '--', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 120_000 });
     if (apply.exitCode !== 0 || apply.timedOut) throw new Error(`git apply failed after a successful check: ${cleanOutput(apply)}`);
     const after = await captureGitSnapshot(state.root);
     state.status = 'applied';
@@ -408,17 +491,27 @@ export async function applyOrchestrationPatch(id: string, patchText: string, all
   });
 }
 
-const VERIFICATION_EXECUTABLES = new Set(['git', 'node', 'npm', 'npx', 'pnpm', 'yarn', 'tsx', 'tsc', 'python', 'python3', 'pytest', 'go', 'cargo', 'rustc', 'make', 'cmake', 'ninja']);
+const VERIFICATION_EXECUTABLES = new Set(['git', 'npm', 'pnpm', 'yarn', 'tsc', 'python', 'python3', 'pytest', 'go', 'cargo', 'make', 'cmake', 'ninja']);
 
 export function validateVerificationCommand(argv: string[]): void {
   if (argv.length === 0) throw new Error('Verification command must not be empty');
   if (argv.length > 100) throw new Error('Verification command is too long');
   const executable = path.basename(argv[0]!);
   if (!VERIFICATION_EXECUTABLES.has(executable)) throw new Error(`Verification executable is not allowed: ${executable}`);
-  for (const argument of argv.slice(1)) assertSafeInspectionArg(argument);
+  for (const argument of argv.slice(1)) assertSafeArgument(argument);
+
   if (executable === 'git' && !(argv[1] === 'diff' && argv.includes('--check'))) {
     throw new Error('Only git diff --check is allowed as a custom verification command');
   }
+  if ((executable === 'npm' || executable === 'pnpm') && argv[1] !== 'run' && argv[1] !== 'test') {
+    throw new Error(`${executable} verification must use run or test`);
+  }
+  if (executable === 'yarn' && argv[1] !== 'run' && argv[1] !== 'test') throw new Error('yarn verification must use run or test');
+  if ((executable === 'python' || executable === 'python3') && !(argv[1] === '-m' && argv[2] === 'pytest')) {
+    throw new Error('Python verification is limited to -m pytest');
+  }
+  if (executable === 'go' && argv[1] !== 'test') throw new Error('Go verification is limited to go test');
+  if (executable === 'cargo' && argv[1] !== 'test' && argv[1] !== 'check') throw new Error('Cargo verification is limited to cargo test/check');
 }
 
 export async function verifyOrchestration(id: string, commands: string[][], timeoutMs: number): Promise<OrchestrationState> {
@@ -428,12 +521,13 @@ export async function verifyOrchestration(id: string, commands: string[][], time
       throw new Error(`Verification requires an applied patch; current status is ${state.status}`);
     }
     commands.forEach(validateVerificationCommand);
+    for (const argv of commands) await assertExistingArgumentsStayInProject(state.root, argv);
     const current = await captureGitSnapshot(state.root);
     if (current.head !== state.baseline.head || current.branch !== state.baseline.branch) throw new Error('Git branch or HEAD changed during orchestration');
-    const diffCheck = await runCommand(['git', 'diff', '--check'], { cwd: state.root, timeoutMs: 60_000 });
+    const diffCheck = await runCommand(['git', 'diff', '--check', '--no-ext-diff'], { cwd: state.root, timeoutMs: 60_000, env: INSPECTION_ENV });
     const results: CommandResult[] = [];
     for (const argv of commands) {
-      results.push(await runCommand(argv, { cwd: state.root, timeoutMs, maxTimeoutMs: config.developmentTimeoutMs }));
+      results.push(await runCommand(argv, { cwd: state.root, timeoutMs, maxTimeoutMs: config.developmentTimeoutMs, env: { NO_COLOR: '1' } }));
     }
     const success = diffCheck.exitCode === 0 && !diffCheck.timedOut && results.every(result => result.exitCode === 0 && !result.timedOut);
     state.verification = {
@@ -453,8 +547,8 @@ export async function finalizeOrchestration(id: string): Promise<OrchestrationSt
   return withOrchestrationLock(id, async () => {
     const state = await loadOrchestration(id);
     if (state.status !== 'verified' || state.verification?.success !== true) throw new Error('Orchestration can only be finalized after successful independent verification');
-    const missingReports = state.lanes.filter(lane => !lane.report).map(lane => lane.id);
-    if (missingReports.length > 0) throw new Error(`All logical lanes must report before finalization: ${missingReports.join(', ')}`);
+    const incompleteLanes = state.lanes.filter(lane => !lane.inspection || !lane.report).map(lane => lane.id);
+    if (incompleteLanes.length > 0) throw new Error(`All logical lanes must be inspected and reported before finalization: ${incompleteLanes.join(', ')}`);
     const current = await captureGitSnapshot(state.root);
     if (current.head !== state.baseline.head || current.branch !== state.baseline.branch) throw new Error('Git branch or HEAD changed before finalization');
     state.status = 'completed';
