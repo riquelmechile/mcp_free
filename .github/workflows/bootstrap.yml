@@ -4,7 +4,7 @@ on:
   push:
     branches: [feat/cachyos-computer-mcp]
     paths:
-      - .bootstrap/payload.tar.gz.b64
+      - .bootstrap/chunk-*
       - .github/workflows/bootstrap.yml
   pull_request:
     branches: [main]
@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .bootstrap/payload.tar.gz.b64 > /tmp/mcp-free.tar.gz
+          cat .bootstrap/chunk-* | base64 --decode > /tmp/mcp-free.tar.gz
           echo '8ac68a02e1d96d239be7afd458dd8cd266636c87cf43db5db42d8d5cad82d1ba  /tmp/mcp-free.tar.gz' | sha256sum --check --strict
           tar -xzf /tmp/mcp-free.tar.gz
           chmod +x scripts/*.sh
