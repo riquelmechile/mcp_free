@@ -12,7 +12,7 @@ import { errorResult, textResult } from './helpers.js';
 const WORKSPACE_COMMANDS = new Set([
   'git', 'node', 'npm', 'npx', 'pnpm', 'yarn', 'tsx', 'tsc', 'python', 'python3', 'pytest',
   'go', 'cargo', 'rustc', 'make', 'cmake', 'ninja', 'rg', 'fd', 'find', 'ls', 'cat', 'sed',
-  'grep', 'head', 'tail', 'wc', 'jq', 'curl', 'gentle-ai'
+  'grep', 'head', 'tail', 'wc', 'jq', 'curl'
 ]);
 
 const CODING_AGENT_EXECUTABLES = new Set(['opencode', 'codex', 'claude', 'gemini']);
@@ -102,7 +102,7 @@ export function registerWorkspaceTools(server: McpServer): void {
 
   server.registerTool('workspace_execute', {
     title: 'Run workspace command',
-    description: 'Execute an argv array without a shell inside an allowed project root. Intended for Git, tests, builds, Gentle AI maintenance, and bounded development tools. Coding agents must use development_execute.',
+    description: 'Execute an argv array without a shell inside an allowed project root. ChatGPT remains the sole reasoning model; external coding agents are blocked.',
     inputSchema: {
       argv: z.array(z.string()).min(1).max(100),
       cwd: z.string(),
@@ -115,7 +115,7 @@ export function registerWorkspaceTools(server: McpServer): void {
     try {
       const executable = path.basename(argv[0]!);
       if (CODING_AGENT_EXECUTABLES.has(executable)) {
-        throw new Error(`${executable} must be launched through development_execute so Gentle AI preparation, Git baselining, verification, and receipts cannot be bypassed.`);
+        throw new Error(`${executable} is blocked because ChatGPT must perform the reasoning through the native development orchestration tools instead of launching another model.`);
       }
       if (!WORKSPACE_COMMANDS.has(executable)) throw new Error(`Executable is not allowed in workspace mode: ${executable}`);
       const resolvedCwd = await resolveAllowedPath(cwd, { mustExist: true });

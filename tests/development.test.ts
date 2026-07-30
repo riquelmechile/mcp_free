@@ -4,52 +4,76 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  buildAgentInvocation,
-  buildDevelopmentPrompt,
-  chooseDevelopmentAgent,
+  defaultLaneSpecs,
   detectVerificationCommands,
-  type DevelopmentAgentState
+  dirtyPathsFromStatus,
+  extractPatchPaths,
+  validateInspectionCommand,
+  validateVerificationCommand
 } from '../src/core/development.js';
 
-const states: DevelopmentAgentState[] = [
-  { id: 'opencode', gentleAgentId: 'opencode', executable: 'opencode', available: true, recordedByGentle: true, gentleConfigured: true, configurationEvidence: ['/tmp/opencode.json'] },
-  { id: 'codex', gentleAgentId: 'codex', executable: 'codex', available: true, recordedByGentle: true, gentleConfigured: true, configurationEvidence: ['/tmp/AGENTS.md'] },
-  { id: 'claude', gentleAgentId: 'claude-code', executable: 'claude', available: false, recordedByGentle: false, gentleConfigured: false, configurationEvidence: [] },
-  { id: 'gemini', gentleAgentId: 'gemini-cli', executable: 'gemini', available: false, recordedByGentle: false, gentleConfigured: false, configurationEvidence: [] }
-];
-
-test('auto prefers a Gentle-configured OpenCode agent', () => {
-  assert.equal(chooseDevelopmentAgent(states, 'auto').id, 'opencode');
+test('creates three distinct ChatGPT-controlled logical lanes', () => {
+  assert.deepEqual(defaultLaneSpecs(3).map(lane => lane.role), ['explore', 'design', 'review']);
+  assert.deepEqual(defaultLaneSpecs(2).map(lane => lane.role), ['explore', 'review']);
+  assert.equal(defaultLaneSpecs(1)[0]?.id, 'lane-1');
+  assert.throws(() => defaultLaneSpecs(4), /between 1 and 3/);
 });
 
-test('rejects an installed agent that is absent from Gentle state', () => {
-  const unrecorded: DevelopmentAgentState[] = [
-    { id: 'opencode', gentleAgentId: 'opencode', executable: 'opencode', available: true, recordedByGentle: false, gentleConfigured: false, configurationEvidence: ['/tmp/opencode.json'] }
-  ];
-  assert.throws(() => chooseDevelopmentAgent(unrecorded, 'auto'), /not recorded by Gentle AI/);
+test('inspection commands remain read-only and project-local', () => {
+  assert.doesNotThrow(() => validateInspectionCommand(['rg', 'development_execute', 'src']));
+  assert.doesNotThrow(() => validateInspectionCommand(['git', 'diff', '--', 'src']));
+  assert.throws(() => validateInspectionCommand(['git', 'reset', '--hard']), /not read-only/);
+  assert.throws(() => validateInspectionCommand(['git', 'branch', 'new-branch']), /not read-only/);
+  assert.throws(() => validateInspectionCommand(['git', 'remote', 'add', 'x', 'url']), /not read-only/);
+  assert.throws(() => validateInspectionCommand(['git', 'tag', 'v1']), /not read-only/);
+  assert.throws(() => validateInspectionCommand(['git', 'diff', '--output=out.txt']), /write files/);
+  assert.throws(() => validateInspectionCommand(['rg', '--pre=processor', 'pattern']), /preprocessors/);
+  assert.throws(() => validateInspectionCommand(['rg', '--follow', 'pattern']), /symlink/);
+  assert.throws(() => validateInspectionCommand(['fd', '--exec', 'rm', '{}']), /execution actions/);
+  assert.throws(() => validateInspectionCommand(['find', '.', '-delete']), /not allowed/);
+  assert.throws(() => validateInspectionCommand(['sed', '-i', 's\/a\/b\/', 'file.ts']), /not allowed/);
+  assert.throws(() => validateInspectionCommand(['cat', '../secret']), /stay inside/);
+  assert.throws(() => validateInspectionCommand(['cat', '.env']), /Credential-like/);
 });
 
-test('OpenCode invocation selects gentle-orchestrator and gates auto approval', () => {
-  const normal = buildAgentInvocation({ agent: states[0]!, prompt: 'task', cwd: '/tmp/project', autoApprove: false });
-  assert.deepEqual(normal.slice(0, 7), ['opencode', 'run', '--dir', '/tmp/project', '--agent', 'gentle-orchestrator', '--title']);
-  assert.equal(normal.includes('--auto'), false);
-  const automatic = buildAgentInvocation({ agent: states[0]!, prompt: 'task', cwd: '/tmp/project', autoApprove: true });
-  assert.equal(automatic.includes('--auto'), true);
+test('extracts bounded patch paths and rejects unsafe patch types', () => {
+  const patch = [
+    'diff --git a/src/a.ts b/src/a.ts',
+    '--- a/src/a.ts',
+    '+++ b/src/a.ts',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    'diff --git a/tests/a.test.ts b/tests/a.test.ts',
+    '--- /dev/null',
+    '+++ b/tests/a.test.ts'
+  ].join('\n');
+  assert.deepEqual(extractPatchPaths(patch), ['src/a.ts', 'tests/a.test.ts']);
+  assert.throws(() => extractPatchPaths('--- a/file\n+++ b/../escape'), /escapes the project/);
+  assert.throws(() => extractPatchPaths('--- a/file\n+++ b/.env'), /credential-like/);
+  assert.throws(() => extractPatchPaths('--- a/file\n+++ b/.git/config'), /Git metadata/);
+  assert.throws(() => extractPatchPaths('new file mode 120000\n--- /dev/null\n+++ b/link'), /Symlink/);
+  assert.throws(() => extractPatchPaths('GIT binary patch\n--- a/file\n+++ b/file'), /Binary/);
 });
 
-test('development prompt preserves unrelated work and requests Gentle routing', () => {
-  const prompt = buildDevelopmentPrompt({
-    task: 'Implement the requested feature',
-    cwd: '/tmp/project',
-    useSdd: false,
-    baselineStatus: ' M existing.ts',
-    verificationCommands: [['npm', 'run', 'check']]
-  });
-  assert.match(prompt, /Gentle AI organic routing/);
-  assert.match(prompt, /preserve unrelated pre-existing changes/);
-  assert.match(prompt, /Do not commit, push/);
-  assert.match(prompt, /npm run check/);
-  assert.match(prompt, /Implement the requested feature/);
+test('parses pre-existing dirty paths for overlap protection', () => {
+  assert.deepEqual(
+    dirtyPathsFromStatus(' M src/a.ts\n?? new.txt\nR  old.ts -> moved.ts'),
+    ['moved.ts', 'new.txt', 'old.ts', 'src/a.ts']
+  );
+});
+
+test('verification commands are bounded to known project checks', () => {
+  assert.doesNotThrow(() => validateVerificationCommand(['npm', 'run', 'check']));
+  assert.doesNotThrow(() => validateVerificationCommand(['npm', 'test']));
+  assert.doesNotThrow(() => validateVerificationCommand(['python', '-m', 'pytest']));
+  assert.doesNotThrow(() => validateVerificationCommand(['go', 'test', './...']));
+  assert.doesNotThrow(() => validateVerificationCommand(['git', 'diff', '--check']));
+  assert.throws(() => validateVerificationCommand(['git', 'push']), /Only git diff --check/);
+  assert.throws(() => validateVerificationCommand(['npm', 'install']), /must use run or test/);
+  assert.throws(() => validateVerificationCommand(['python', 'script.py']), /limited to -m pytest/);
+  assert.throws(() => validateVerificationCommand(['npx', 'some-package']), /not allowed/);
+  assert.throws(() => validateVerificationCommand(['bash', '-c', 'anything']), /not allowed/);
 });
 
 test('auto-detects bounded package verification scripts', async () => {
