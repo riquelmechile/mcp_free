@@ -33,7 +33,7 @@ test('runs one ChatGPT-native lane through patch, verification, and byte-bound f
     let state = await development.createOrchestration({ cwd: root, objective: 'Update the tracked test file safely', laneCount: 1, useSdd: false });
     state = await development.runParallelInspection(state.id, [{
       laneId: 'lane-1',
-      commands: [['git', 'status', '--short'], ['rg', 'baseline', 'tracked.txt']]
+      commands: [['git', 'status', '--short'], ['git', 'grep', 'baseline', '--', 'tracked.txt']]
     }], 30_000);
     assert.equal(state.lanes[0]?.inspection?.results.length, 2);
 
@@ -42,7 +42,7 @@ test('runs one ChatGPT-native lane through patch, verification, and byte-bound f
       summary: 'The bounded change affects tracked.txt only.',
       findings: ['tracked.txt contains the baseline value'],
       recommendations: ['replace the single line and verify the diff'],
-      evidence: ['rg baseline tracked.txt']
+      evidence: ['git grep baseline -- tracked.txt']
     });
 
     const patch = [
