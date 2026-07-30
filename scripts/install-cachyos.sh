@@ -65,6 +65,7 @@ MCP_AUTH_TOKEN=
 MCP_MAX_READ_BYTES=1048576
 MCP_MAX_OUTPUT_BYTES=262144
 MCP_COMMAND_TIMEOUT_MS=120000
+MCP_DEVELOPMENT_TIMEOUT_MS=1800000
 MCP_RATE_LIMIT_PER_MINUTE=120
 MCP_STATE_DIR=$STATE_DIR
 MCP_LOG_LEVEL=info
@@ -73,6 +74,7 @@ ENV
   chmod 600 "$ENV_FILE"
 else
   sed -i "s/^MCP_MODE=.*/MCP_MODE=$MODE/" "$ENV_FILE"
+  grep -q '^MCP_DEVELOPMENT_TIMEOUT_MS=' "$ENV_FILE" || printf '\nMCP_DEVELOPMENT_TIMEOUT_MS=1800000\n' >> "$ENV_FILE"
 fi
 
 cat > "$UNIT_DIR/mcp-free.service" <<UNIT
@@ -116,4 +118,5 @@ echo
 echo "Installed in mode: $MODE"
 echo "Config: $ENV_FILE"
 echo "Logs: journalctl --user -u mcp-free -f"
+echo "Development: configure an agent with Gentle AI, then call development_status before development_execute."
 echo "Next: create an OpenAI Secure MCP Tunnel and run ./scripts/setup-secure-tunnel.sh"
