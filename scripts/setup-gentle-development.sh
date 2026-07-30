@@ -75,10 +75,10 @@ GENTLE_AI_NO_SELF_UPDATE=1 GENTLE_AI_YES=1 \
 if [[ -n "$PROJECT" ]]; then
   PROJECT="$(realpath "$PROJECT")"
   git -C "$PROJECT" rev-parse --show-toplevel >/dev/null
-  gentle-ai skill-registry refresh --cwd "$PROJECT" --quiet
+  GENTLE_AI_NO_SELF_UPDATE=1 gentle-ai skill-registry refresh --cwd "$PROJECT" --quiet
 fi
 
-gentle-ai doctor
+GENTLE_AI_NO_SELF_UPDATE=1 gentle-ai doctor
 
 echo
 echo "Gentle development configured."
