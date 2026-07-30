@@ -15,13 +15,19 @@ import {
 } from '../core/development.js';
 import { assertWorkspaceCwd, resolveAllowedPath } from '../core/paths.js';
 import { requireConfirmation } from '../core/policy.js';
-import { writeReceipt } from '../core/receipts.js';
+import { verifyReceiptChain, writeReceipt } from '../core/receipts.js';
+import { assertVerifiedWorktreeUnchanged, recordVerifiedWorktree } from '../core/worktree-fingerprint.js';
 import { errorResult, textResult } from './helpers.js';
+
+async function assertHealthyAuditChain(): Promise<void> {
+  const verification = await verifyReceiptChain();
+  if (!verification.valid) throw new Error(`Receipt chain is invalid; refusing to mutate orchestration state: ${verification.errors.join('; ')}`);
+}
 
 export function registerDevelopmentTools(server: McpServer, options: { allowExecute: boolean }): void {
   server.registerTool('development_status', {
     title: 'Inspect ChatGPT-native development readiness',
-    description: 'Inspect a Git project and return the local context, existing changes, verification commands, and the three-lane orchestration contract. ChatGPT is the sole reasoning model; this tool never launches another AI.',
+    description: 'Inspect a Git project and return local context, existing changes, verification commands, and the three-lane orchestration contract. ChatGPT is the sole reasoning model; this tool never launches another AI.',
     inputSchema: { cwd: z.string() },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   }, async ({ cwd }) => {
@@ -68,6 +74,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
   }, async ({ cwd, objective, lane_count, use_sdd, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyAuditChain();
       const resolvedCwd = await resolveAllowedPath(cwd, { mustExist: true });
       assertWorkspaceCwd(resolvedCwd);
       const state = await createOrchestration({ cwd: resolvedCwd, objective, laneCount: lane_count, useSdd: use_sdd });
@@ -102,10 +109,11 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
       timeout_ms: z.number().int().min(100).max(300_000).default(120_000),
       request_id: z.string().min(8).max(128).optional()
     },
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false }
   }, async ({ orchestration_id, lanes, timeout_ms, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyAuditChain();
       const state = await runParallelInspection(
         orchestration_id,
         lanes.map(lane => ({ laneId: lane.lane_id, commands: lane.commands })),
@@ -146,6 +154,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
   }, async ({ orchestration_id, lane_id, summary, findings, recommendations, evidence, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyAuditChain();
       const state = await recordLaneReport(orchestration_id, { laneId: lane_id, summary, findings, recommendations, evidence });
       const lane = state.lanes.find(candidate => candidate.id === lane_id);
       const receipt = await writeReceipt({
@@ -166,7 +175,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
 
   server.registerTool('development_apply_patch', {
     title: 'Apply ChatGPT-synthesized development patch',
-    description: 'Apply one unified Git patch synthesized by ChatGPT after all logical lanes have reported. Refuses concurrent worktree changes and protects pre-existing dirty files unless explicitly approved.',
+    description: 'Apply one unified Git patch synthesized by ChatGPT after all logical lanes have reported. Refuses concurrent worktree changes, symlink/submodule patches, and pre-existing dirty files unless explicitly approved.',
     inputSchema: {
       orchestration_id: z.string(),
       patch: z.string().min(10).max(2_000_000),
@@ -179,6 +188,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
     const started = Date.now();
     try {
       requireConfirmation(2, confirm);
+      await assertHealthyAuditChain();
       const result = await applyOrchestrationPatch(orchestration_id, patch, allow_touch_dirty);
       const receipt = await writeReceipt({
         action: 'development_apply_patch',
@@ -210,12 +220,12 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
 
   server.registerTool('development_verify', {
     title: 'Independently verify ChatGPT development changes',
-    description: 'Run git diff --check and bounded project verification after a patch. Test/build scripts can execute repository code, so explicit approval is required.',
+    description: 'Run git diff --check and bounded project verification after a patch. Test/build scripts can execute repository code, so explicit approval is required. Successful verification is bound to the exact worktree and index bytes.',
     inputSchema: {
       orchestration_id: z.string(),
       verification: z.enum(['auto', 'custom', 'none']).default('auto'),
       verify_argv: z.array(z.array(z.string()).min(1).max(100)).max(8).default([]),
-      timeout_ms: z.number().int().min(1_000).max(config.developmentTimeoutMs).default(900_000),
+      timeout_ms: z.number().int().min(1_000).max(config.developmentTimeoutMs).default(Math.min(900_000, config.developmentTimeoutMs)),
       confirm: z.boolean().default(false),
       request_id: z.string().min(8).max(128).optional()
     },
@@ -224,6 +234,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
     const started = Date.now();
     try {
       requireConfirmation(2, confirm);
+      await assertHealthyAuditChain();
       const before = await loadOrchestration(orchestration_id);
       let commands: string[][];
       if (verification === 'custom') {
@@ -237,6 +248,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
       commands.forEach(validateVerificationCommand);
       const state = await verifyOrchestration(orchestration_id, commands, timeout_ms);
       const verificationRecord = state.verification;
+      const worktreeFingerprint = verificationRecord?.success ? await recordVerifiedWorktree(state) : null;
       const receipt = await writeReceipt({
         action: 'development_verify',
         riskTier: 2,
@@ -244,14 +256,20 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
         durationMs: Date.now() - started,
         requestId: request_id,
         target: state.root,
-        output: JSON.stringify(verificationRecord),
-        details: { orchestrationId: state.id, verificationMode: verification, commands, status: state.status }
+        output: JSON.stringify({ verificationRecord, worktreeFingerprint }),
+        details: {
+          orchestrationId: state.id,
+          verificationMode: verification,
+          commands,
+          status: state.status,
+          worktreeFingerprint: worktreeFingerprint?.fingerprint ?? null
+        }
       });
       return textResult(
         verificationRecord?.success
-          ? `Independent verification passed for ${state.id}. Receipt: ${receipt.id}.`
+          ? `Independent verification passed and was bound to exact worktree bytes for ${state.id}. Receipt: ${receipt.id}.`
           : `Independent verification failed for ${state.id}. Receipt: ${receipt.id}.`,
-        { orchestration: state, receipt } as unknown as Record<string, unknown>
+        { orchestration: state, worktreeFingerprint, receipt } as unknown as Record<string, unknown>
       );
     } catch (error) {
       return errorResult(error);
@@ -260,7 +278,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
 
   server.registerTool('development_finalize', {
     title: 'Finalize verified ChatGPT development orchestration',
-    description: 'Finalize only after every logical lane has reported and independent verification has passed. Produces the governing completion receipt.',
+    description: 'Finalize only after every logical lane has reported, independent verification has passed, and the exact worktree/index bytes still match the verified fingerprint.',
     inputSchema: {
       orchestration_id: z.string(),
       request_id: z.string().min(8).max(128).optional()
@@ -269,6 +287,9 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
   }, async ({ orchestration_id, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyAuditChain();
+      const before = await loadOrchestration(orchestration_id);
+      const worktreeFingerprint = await assertVerifiedWorktreeUnchanged(before);
       const state = await finalizeOrchestration(orchestration_id);
       const receipt = await writeReceipt({
         action: 'development_finalize',
@@ -277,17 +298,18 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
         durationMs: Date.now() - started,
         requestId: request_id,
         target: state.root,
-        output: JSON.stringify(state),
+        output: JSON.stringify({ state, worktreeFingerprint }),
         details: {
           orchestrationId: state.id,
           patchSha256: state.patchSha256,
-          lanes: state.lanes.map(lane => ({ id: lane.id, role: lane.role, reported: Boolean(lane.report) })),
+          lanes: state.lanes.map(lane => ({ id: lane.id, role: lane.role, inspected: Boolean(lane.inspection), reported: Boolean(lane.report) })),
           verificationSuccess: state.verification?.success === true,
+          verifiedWorktreeFingerprint: worktreeFingerprint.fingerprint,
           reasoningModel: 'ChatGPT',
           externalModels: false
         }
       });
-      return textResult(`Finalized ${state.id}. Governing receipt: ${receipt.id}.`, { orchestration: state, receipt } as unknown as Record<string, unknown>);
+      return textResult(`Finalized ${state.id}. Governing receipt: ${receipt.id}.`, { orchestration: state, worktreeFingerprint, receipt } as unknown as Record<string, unknown>);
     } catch (error) {
       return errorResult(error);
     }
