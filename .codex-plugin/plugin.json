@@ -1,7 +1,7 @@
 {
   "name": "mcp-free-cachyos",
-  "version": "0.3.0",
-  "description": "ChatGPT-native computer control and three-lane development orchestration for a private CachyOS MCP server.",
+  "version": "0.4.0",
+  "description": "ChatGPT-native computer control with a persistent three-lane development coordinator for a private CachyOS MCP server.",
   "repository": "https://github.com/riquelmechile/mcp_free",
   "license": "MIT",
   "keywords": [
@@ -11,13 +11,14 @@
     "computer-control",
     "chatgpt",
     "orchestration",
+    "persistent-workers",
     "development"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "MCP Free CachyOS",
-    "shortDescription": "Let ChatGPT operate and develop directly on CachyOS",
-    "longDescription": "ChatGPT remains the sole reasoning model while the private MCP provides controlled local tools, up to three concurrent logical inspection lanes, bounded patch application, independent verification, and tamper-evident receipts.",
+    "shortDescription": "Let ChatGPT orchestrate persistent local workers on CachyOS",
+    "longDescription": "ChatGPT remains the sole reasoning model while a resident private MCP coordinator queues up to three local inspection workers, persists command-level progress, exposes status/wait/result tools, applies bounded patches, verifies exact worktree bytes, and produces tamper-evident receipts.",
     "developerName": "riquelmechile",
     "category": "Productivity",
     "capabilities": [
@@ -26,8 +27,8 @@
     ],
     "defaultPrompt": [
       "Inspect my CachyOS computer and report its current state without changing anything.",
-      "Act as the development orchestrator for this Git project. Use up to three logical lanes, but do not launch another AI model.",
-      "Complete this development task yourself through the native orchestration flow, preserve existing work, verify the outcome, and include every execution receipt."
+      "Act as the only development model. Dispatch three persistent local lanes, observe them with status or wait, and process each completed result while the others continue.",
+      "Complete this development task through the persistent orchestration flow, preserve existing work, verify the outcome, and include every execution receipt."
     ]
   }
 }
