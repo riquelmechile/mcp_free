@@ -35,7 +35,7 @@ function validateVerificationCommands(commands: string[][]): void {
 export function registerDevelopmentTools(server: McpServer, options: { allowExecute: boolean }): void {
   server.registerTool('development_status', {
     title: 'Inspect Gentle AI development readiness',
-    description: 'Inspect a Git project, Gentle AI health/review mode, skill registry, and supported non-interactive coding agents before delegating development.',
+    description: 'Inspect a Git project, Gentle AI authoritative state, health/review mode, skill registry, and supported non-interactive coding agents before delegating development.',
     inputSchema: { cwd: z.string() },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   }, async ({ cwd }) => {
@@ -44,9 +44,11 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
       assertWorkspaceCwd(resolvedCwd);
       const state = await inspectGentleProject(resolvedCwd);
       return textResult(
-        state.recommendedAgent
+        state.recommendedAgent && !state.gentleAi.pendingSync
           ? `Gentle development is ready with ${state.recommendedAgent} in ${state.cwd}.`
-          : 'No Gentle-configured non-interactive development agent is ready.',
+          : state.gentleAi.pendingSync
+            ? 'Gentle AI has a pending sync; run gentle-ai sync before delegated development.'
+            : 'No Gentle-configured non-interactive development agent is ready.',
         state as unknown as Record<string, unknown>
       );
     } catch (error) {
@@ -85,8 +87,17 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
       assertWorkspaceCwd(resolvedCwd);
       const beforeState = await inspectGentleProject(resolvedCwd);
       if (!beforeState.gentleAi.installed) throw new Error('gentle-ai is required for development_execute');
+      if (!beforeState.gentleAi.stateReadable) {
+        throw new Error(`Gentle AI state is missing or unreadable at ${beforeState.gentleAi.statePath}: ${beforeState.gentleAi.stateError ?? 'unknown error'}`);
+      }
+      if (beforeState.gentleAi.pendingSync) {
+        throw new Error('Gentle AI reports pending_sync=true. Run gentle-ai sync and re-run development_status before delegating development.');
+      }
       if (beforeState.gentleAi.doctorExitCode !== 0) {
         throw new Error(`gentle-ai doctor is not healthy: ${beforeState.gentleAi.doctorOutput ?? 'no output'}`);
+      }
+      if (beforeState.gentleAi.reviewModeExitCode !== 0) {
+        throw new Error(`Unable to read Gentle AI review mode: ${beforeState.gentleAi.reviewModeOutput ?? 'no output'}`);
       }
       const selected = chooseDevelopmentAgent(beforeState.agents, agent as DevelopmentAgentPreference);
 
@@ -162,6 +173,7 @@ export function registerDevelopmentTools(server: McpServer, options: { allowExec
         output: evidence,
         details: {
           agent: selected.id,
+          gentleAgentId: selected.gentleAgentId,
           useSdd: use_sdd,
           autoApproveAgent: auto_approve_agent,
           refreshedSkillRegistry: refreshResult !== null,
