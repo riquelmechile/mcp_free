@@ -1,7 +1,7 @@
 {
   "name": "mcp-free-cachyos",
-  "version": "0.1.0",
-  "description": "Evidence-first computer-control workflows for a private CachyOS MCP server.",
+  "version": "0.2.0",
+  "description": "Evidence-first computer control and Gentle AI development orchestration for a private CachyOS MCP server.",
   "repository": "https://github.com/riquelmechile/mcp_free",
   "license": "MIT",
   "keywords": [
@@ -9,13 +9,14 @@
     "cachyos",
     "linux",
     "computer-control",
-    "gentle-ai"
+    "gentle-ai",
+    "development"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "MCP Free CachyOS",
-    "shortDescription": "Operate CachyOS through a private MCP",
-    "longDescription": "Inspect and operate files, terminal, processes, apps and KDE/Wayland with explicit risk gates and execution receipts.",
+    "shortDescription": "Operate and develop on CachyOS through a private MCP",
+    "longDescription": "Inspect and operate CachyOS, and delegate software work to Gentle AI-configured OpenCode, Codex, Claude Code or Gemini agents with explicit risk gates, independent verification and execution receipts.",
     "developerName": "riquelmechile",
     "category": "Productivity",
     "capabilities": [
@@ -24,7 +25,8 @@
     ],
     "defaultPrompt": [
       "Inspect my CachyOS computer and report its current state without changing anything.",
-      "Complete this task on my computer, verify the outcome, and include every execution receipt."
+      "Inspect development readiness for this Git project using Gentle AI without changing files.",
+      "Complete this development task through the Gentle AI development workflow, preserve existing work, verify the outcome, and include every execution receipt."
     ]
   }
 }
