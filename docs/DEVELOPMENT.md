@@ -1,118 +1,130 @@
 # Desarrollo nativo: ChatGPT como orquestador
 
-MCP Free no ejecuta OpenCode, Codex, Claude Code, Gemini CLI ni otro modelo. **ChatGPT es el único cerebro**: decide, divide el trabajo, interpreta evidencia, sintetiza el cambio y genera el parche. El servidor MCP aporta acceso local controlado, paralelismo determinista, estado, verificación y recibos.
-
-La inspiración de Gentle AI se implementa como método operativo, no como dependencia de modelos:
+MCP Free no ejecuta OpenCode, Codex, Claude Code, Gemini CLI ni otro modelo. **ChatGPT es el único cerebro**: decide, divide, interpreta evidencia, sintetiza el cambio y genera el parche. El servidor MCP aporta acceso local controlado, workers deterministas, estado persistente, verificación y recibos.
 
 ```text
-inspeccionar → dividir → explorar en paralelo → sintetizar → aplicar → verificar → finalizar
+inspeccionar → dividir → despachar → observar → sintetizar → aplicar → verificar → finalizar
 ```
+
+## Qué permanece corriendo
+
+ChatGPT no queda pensando como proceso de fondo después de responder. Quien permanece activo es el servicio local `mcp-free.service` y su coordinador de carriles.
+
+El ciclo es:
+
+```text
+ChatGPT despacha 3 carriles
+        │
+        └── development_parallel_inspect devuelve inmediatamente
+                 │
+                 ├── worker lane-1: queued → running → completed
+                 ├── worker lane-2: queued → running → completed
+                 └── worker lane-3: queued → running → completed
+
+ChatGPT consulta status/wait/result y sintetiza cada carril disponible.
+```
+
+El coordinador ejecuta hasta tres workers al mismo tiempo y persiste su progreso después de cada comando en:
+
+```text
+~/.local/state/mcp-free/orchestration-workers/<orchestration_id>/workers.json
+```
+
+Estados por carril:
+
+- `queued`: validado y esperando capacidad;
+- `running`: ejecutando comandos locales;
+- `completed`: todos los comandos terminaron correctamente;
+- `failed`: un comando falló o agotó el tiempo;
+- `interrupted`: el servicio se reinició o perdió al worker antes de terminar.
+
+Un reinicio no presenta un carril inconcluso como exitoso. Debe reencolarse explícitamente.
 
 ## Qué significa “tres subagentes”
 
-En una app MCP de ChatGPT, el servidor no puede crear tres copias independientes de ChatGPT. MCP Free implementa **tres carriles lógicos** administrados por la misma conversación:
+Son tres carriles lógicos administrados por la misma conversación:
 
 1. `explore`: arquitectura, archivos, dependencias y evidencia;
 2. `design`: solución mínima, interfaces, invariantes y pruebas;
 3. `review`: revisión adversarial de regresiones, seguridad y compatibilidad.
 
-Cada carril conserva un brief, comandos de inspección, resultados y reporte independiente. `development_parallel_inspect` ejecuta los comandos locales de hasta tres carriles simultáneamente mediante concurrencia real del servidor. ChatGPT interpreta esos resultados por separado y luego los sintetiza.
+No son tres modelos independientes. La concurrencia real ocurre en los workers locales y sus comandos; ChatGPT sigue siendo el único razonamiento y la síntesis central.
+
+## Herramientas de coordinación
+
+### `development_orchestration_start`
+
+Congela rama, HEAD y estado inicial, y crea uno a tres carriles.
+
+### `development_parallel_inspect`
+
+Valida y **encola** los carriles. No espera a que terminen. Devuelve un `revision` y un resumen del coordinador.
+
+### `development_orchestration_status`
+
+Devuelve inmediatamente el estado central y un resumen de carriles `queued`, `running`, `completed`, `failed` e `interrupted`.
+
+### `development_orchestration_wait`
+
+Hace long-poll acotado por hasta 30 segundos. Use `after_revision` con la última revisión conocida. Retorna cuando un carril inicia, avanza, termina, falla o se interrumpe. No detiene a los workers.
+
+### `development_lane_result`
+
+Lee un carril completo o el resultado de un comando concreto. Permite consumir `lane-1` cuando termina aunque `lane-2` y `lane-3` sigan ejecutándose.
+
+### `development_lane_report`
+
+Registra la síntesis de ChatGPT para un carril que terminó correctamente. Puede llamarse mientras otros workers continúan.
+
+### `development_apply_patch`
+
+Sólo permite aplicar cuando todos los workers configurados están `completed` y todos los carriles tienen reporte. Exige aprobación, baseline Git intacto y `git apply --check`.
+
+### `development_verify` y `development_finalize`
+
+Ejecutan comprobaciones aprobadas, ligan la verificación a los bytes del worktree y sólo finalizan si no cambió nada después.
 
 ## Flujo obligatorio
 
-### 1. Estado del proyecto
+1. Llame `development_status` y lea el contexto relevante.
+2. Cree la orquestación con `development_orchestration_start`.
+3. Despache los tres carriles mediante una sola llamada a `development_parallel_inspect`.
+4. Guarde el `revision` retornado.
+5. Use `development_orchestration_wait` o `development_orchestration_status` para observar progreso.
+6. Cuando aparezca un carril en `completed`, lea `development_lane_result`, razone sobre su evidencia y registre `development_lane_report`. Los otros pueden seguir corriendo.
+7. Si un carril queda `failed` o `interrupted`, inspeccione el error y vuelva a encolarlo. No sintetice ese carril antes de completarlo.
+8. Cuando los tres reportes estén listos, sintetice un único parche mínimo.
+9. Explique archivos y riesgos y solicite aprobación antes de `development_apply_patch`.
+10. Solicite otra aprobación antes de ejecutar scripts con `development_verify`.
+11. Finalice con `development_finalize` y entregue todos los receipts.
 
-```text
-Usa development_status en ~/code/MI_PROYECTO. No cambies nada.
-```
-
-Devuelve:
-
-- raíz Git, rama, HEAD y cambios existentes;
-- archivos de contexto como `AGENTS.md`, `README.md` y `.atl/skill-registry.md`;
-- verificaciones detectadas;
-- contrato de orquestación: ChatGPT, cero modelos externos y máximo tres carriles.
-
-### 2. Crear la orquestación
-
-```text
-Inicia una orquestación para corregir el problema con tres carriles y sin lanzar otros modelos.
-```
-
-ChatGPT llama `development_orchestration_start`. El MCP congela la identidad Git y el estado inicial, pero todavía no modifica el proyecto.
-
-### 3. Inspección paralela
-
-ChatGPT define comandos de lectura diferentes para cada carril y llama una vez a `development_parallel_inspect` con los tres. Sólo se aceptan comandos de inspección acotados y Git de lectura. Se bloquean:
-
-- `git reset`, checkout, clean, commit y push;
-- `sed -i`, `find -delete` y acciones `-exec`;
-- rutas absolutas o que escapen con `..`;
-- rutas con apariencia de credenciales.
-
-### 4. Reportes separados
-
-ChatGPT razona sobre cada resultado y llama `development_lane_report` para cada carril. El parche no puede aplicarse hasta que todos los carriles configurados tengan reporte.
-
-### 5. Síntesis y parche
-
-ChatGPT integra los tres reportes y crea un único parche Git. Antes de aplicar debe explicar los archivos y solicitar aprobación. `development_apply_patch`:
-
-- exige `confirm=true`;
-- verifica que rama, HEAD y estado sigan iguales al baseline;
-- ejecuta `git apply --check` antes de aplicar;
-- bloquea rutas sensibles y escapes;
-- no permite tocar archivos que ya estaban sucios salvo aprobación explícita mediante `allow_touch_dirty=true`;
-- registra hash SHA-256 del parche y rutas afectadas.
-
-### 6. Verificación independiente
-
-`development_verify` ejecuta siempre `git diff --check` y puede detectar o recibir verificaciones como:
-
-- `npm/pnpm/yarn run check`;
-- typecheck, tests y build;
-- `go test ./...`;
-- `cargo test`;
-- `python -m pytest`.
-
-Los scripts del repositorio son código ejecutable, por lo que esta etapa es tier 2 y exige una segunda aprobación con `confirm=true`.
-
-### 7. Finalización
-
-`development_finalize` sólo funciona cuando:
-
-- todos los carriles entregaron reporte;
-- la verificación independiente pasó;
-- rama y HEAD siguen intactos.
-
-Entrega el recibo gobernante de la ejecución.
-
-## Uso recomendado desde ChatGPT
+## Prompt recomendado
 
 ```text
 Actúa tú como orquestador de desarrollo en ~/code/Msl.
 No uses OpenCode, Codex, Claude, Gemini ni ningún otro modelo.
 
-1. Inspecciona el proyecto.
-2. Crea tres carriles: exploración, diseño y revisión adversarial.
-3. Ejecuta sus inspecciones locales en paralelo.
-4. Registra cada reporte por separado.
-5. Sintetiza un parche mínimo.
-6. Antes de aplicarlo, explícame archivos y riesgos y pide aprobación.
-7. Verifica con los comandos detectados, pidiendo aprobación para ejecutar scripts.
-8. Finaliza y entrégame todos los receipts.
+1. Ejecuta development_status e inicia tres carriles.
+2. Despáchalos con development_parallel_inspect y vuelve inmediatamente al rol de coordinador.
+3. Conserva el revision retornado y usa development_orchestration_wait/status para observar avances.
+4. Cuando termine un carril, lee development_lane_result y registra su development_lane_report aunque los otros sigan corriendo.
+5. No apliques nada hasta que los tres workers estén completed y los tres reportes existan.
+6. Sintetiza tú mismo un único parche mínimo.
+7. Pide aprobación para aplicarlo y otra para tests/builds.
+8. Finaliza y entrega todos los receipts.
 
 No hagas commit ni push.
 ```
 
 ## SDD
 
-`use_sdd=true` no inicia otro agente. Sólo indica a ChatGPT que debe producir artefactos durables de propuesta, especificación, diseño y tareas antes del parche. Para correcciones pequeñas use `false`; para funcionalidades amplias o ambiguas use `true`.
+`use_sdd=true` no inicia otro agente. Exige a ChatGPT producir propuesta, especificación, diseño y tareas durables antes del parche. Para correcciones pequeñas use `false`; para funcionalidades amplias o ambiguas use `true`.
 
 ## Límites reales
 
-- Los carriles son roles lógicos del mismo ChatGPT, no tres contextos de modelo independientes.
-- La concurrencia garantizada ocurre en los comandos locales enviados en una sola llamada a `development_parallel_inspect`.
+- ChatGPT no sigue razonando fuera de una ejecución del chat.
+- El coordinador MCP y los workers locales sí continúan después de que la llamada de despacho responde.
+- Los resultados persisten, pero los procesos no se reanudan automáticamente tras reiniciar el servicio: se marcan `interrupted` y deben reencolarse.
+- Los carriles son roles lógicos del mismo ChatGPT, no contextos de modelo independientes.
 - El MCP no contiene API keys de modelos ni invoca proveedores de IA.
-- El servidor no hace commit, push ni PR dentro del flujo de implementación.
-- Para subagentes de modelo realmente independientes sería necesaria una superficie de producto/API que ofrezca multi-agent; no es una capacidad que el MCP pueda inventar por sí solo.
+- El flujo no hace commit, push ni PR automáticamente.
