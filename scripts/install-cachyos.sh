@@ -12,6 +12,7 @@ while (($#)); do
       cat <<'HELP'
 Usage: ./scripts/install-cachyos.sh [--observe|--full] [--desktop-control]
   default             workspace mode (files/projects + approved developer commands)
+  --observe           read-only inspection mode; recommended for first installation
   --full              full filesystem, shell, processes, apps, clipboard and GUI tools
   --desktop-control   install/configure KDE Wayland input automation through ydotool
 HELP
@@ -32,6 +33,8 @@ if ! command -v pacman >/dev/null 2>&1; then
   echo "This installer is only for CachyOS/Arch (pacman was not found)." >&2
   exit 1
 fi
+
+chmod +x "$ROOT_DIR"/scripts/*.sh
 
 sudo pacman -S --needed --noconfirm \
   nodejs npm git ripgrep fd jq curl wl-clipboard spectacle xdg-utils trash-cli ydotool
