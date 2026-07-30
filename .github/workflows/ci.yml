@@ -17,5 +17,12 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npm run check
+      - name: Check
+        run: npm run check > ci-log.txt 2>&1
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-log
+          path: ci-log.txt
       - run: npm run build
