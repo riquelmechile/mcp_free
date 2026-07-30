@@ -1,6 +1,6 @@
 {
   "name": "mcp-free-cachyos",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "MCP server for controlled local-computer access on CachyOS, designed for ChatGPT developer mode and OpenAI Secure MCP Tunnel.",
   "type": "module",
