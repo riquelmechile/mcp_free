@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+coverage/
+.mcp-free/
+*.png
+.DS_Store

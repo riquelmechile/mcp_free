@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenAI Secure MCP Tunnel for MCP Free
+After=mcp-free.service network-online.target
+Requires=mcp-free.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=__TUNNEL_ENV__
+ExecStart=__TUNNEL_CLIENT__ run --profile mcp-free
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
