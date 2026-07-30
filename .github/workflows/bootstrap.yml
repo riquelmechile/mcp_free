@@ -29,7 +29,8 @@ jobs:
           echo '8ac68a02e1d96d239be7afd458dd8cd266636c87cf43db5db42d8d5cad82d1ba  /tmp/mcp-free.tar.gz' | sha256sum --check --strict
           tar -xzf /tmp/mcp-free.tar.gz
           chmod +x scripts/*.sh
-          rm -rf .bootstrap .github/workflows/bootstrap.yml
+          rm -rf .bootstrap
+          rm -f .github/workflows/ci.yml
       - name: Commit expanded repository
         shell: bash
         run: |
