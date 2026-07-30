@@ -1,7 +1,7 @@
 {
   "name": "mcp-free-cachyos",
-  "version": "0.2.0",
-  "description": "Evidence-first computer control and Gentle AI development orchestration for a private CachyOS MCP server.",
+  "version": "0.3.0",
+  "description": "ChatGPT-native computer control and three-lane development orchestration for a private CachyOS MCP server.",
   "repository": "https://github.com/riquelmechile/mcp_free",
   "license": "MIT",
   "keywords": [
@@ -9,14 +9,15 @@
     "cachyos",
     "linux",
     "computer-control",
-    "gentle-ai",
+    "chatgpt",
+    "orchestration",
     "development"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "MCP Free CachyOS",
-    "shortDescription": "Operate and develop on CachyOS through a private MCP",
-    "longDescription": "Inspect and operate CachyOS, and delegate software work to Gentle AI-configured OpenCode, Codex, Claude Code or Gemini agents with explicit risk gates, independent verification and execution receipts.",
+    "shortDescription": "Let ChatGPT operate and develop directly on CachyOS",
+    "longDescription": "ChatGPT remains the sole reasoning model while the private MCP provides controlled local tools, up to three concurrent logical inspection lanes, bounded patch application, independent verification, and tamper-evident receipts.",
     "developerName": "riquelmechile",
     "category": "Productivity",
     "capabilities": [
@@ -25,8 +26,8 @@
     ],
     "defaultPrompt": [
       "Inspect my CachyOS computer and report its current state without changing anything.",
-      "Inspect development readiness for this Git project using Gentle AI without changing files.",
-      "Complete this development task through the Gentle AI development workflow, preserve existing work, verify the outcome, and include every execution receipt."
+      "Act as the development orchestrator for this Git project. Use up to three logical lanes, but do not launch another AI model.",
+      "Complete this development task yourself through the native orchestration flow, preserve existing work, verify the outcome, and include every execution receipt."
     ]
   }
 }
