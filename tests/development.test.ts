@@ -23,13 +23,20 @@ test('inspection commands remain read-only and project-local', () => {
   assert.doesNotThrow(() => validateInspectionCommand(['rg', 'development_execute', 'src']));
   assert.doesNotThrow(() => validateInspectionCommand(['git', 'diff', '--', 'src']));
   assert.throws(() => validateInspectionCommand(['git', 'reset', '--hard']), /not read-only/);
-  assert.throws(() => validateInspectionCommand(['find', '.', '-delete']), /Mutating find/);
-  assert.throws(() => validateInspectionCommand(['sed', '-i', 's/a/b/', 'file.ts']), /sed -i/);
+  assert.throws(() => validateInspectionCommand(['git', 'branch', 'new-branch']), /not read-only/);
+  assert.throws(() => validateInspectionCommand(['git', 'remote', 'add', 'x', 'url']), /not read-only/);
+  assert.throws(() => validateInspectionCommand(['git', 'tag', 'v1']), /not read-only/);
+  assert.throws(() => validateInspectionCommand(['git', 'diff', '--output=out.txt']), /write files/);
+  assert.throws(() => validateInspectionCommand(['rg', '--pre=processor', 'pattern']), /preprocessors/);
+  assert.throws(() => validateInspectionCommand(['rg', '--follow', 'pattern']), /symlink/);
+  assert.throws(() => validateInspectionCommand(['fd', '--exec', 'rm', '{}']), /execution actions/);
+  assert.throws(() => validateInspectionCommand(['find', '.', '-delete']), /not allowed/);
+  assert.throws(() => validateInspectionCommand(['sed', '-i', 's\/a\/b\/', 'file.ts']), /not allowed/);
   assert.throws(() => validateInspectionCommand(['cat', '../secret']), /stay inside/);
-  assert.throws(() => validateInspectionCommand(['cat', '.env']), /credential-like/);
+  assert.throws(() => validateInspectionCommand(['cat', '.env']), /Credential-like/);
 });
 
-test('extracts bounded patch paths and rejects escapes', () => {
+test('extracts bounded patch paths and rejects unsafe patch types', () => {
   const patch = [
     'diff --git a/src/a.ts b/src/a.ts',
     '--- a/src/a.ts',
@@ -44,6 +51,9 @@ test('extracts bounded patch paths and rejects escapes', () => {
   assert.deepEqual(extractPatchPaths(patch), ['src/a.ts', 'tests/a.test.ts']);
   assert.throws(() => extractPatchPaths('--- a/file\n+++ b/../escape'), /escapes the project/);
   assert.throws(() => extractPatchPaths('--- a/file\n+++ b/.env'), /credential-like/);
+  assert.throws(() => extractPatchPaths('--- a/file\n+++ b/.git/config'), /Git metadata/);
+  assert.throws(() => extractPatchPaths('new file mode 120000\n--- /dev/null\n+++ b/link'), /Symlink/);
+  assert.throws(() => extractPatchPaths('GIT binary patch\n--- a/file\n+++ b/file'), /Binary/);
 });
 
 test('parses pre-existing dirty paths for overlap protection', () => {
@@ -53,10 +63,16 @@ test('parses pre-existing dirty paths for overlap protection', () => {
   );
 });
 
-test('verification commands are bounded', () => {
+test('verification commands are bounded to known project checks', () => {
   assert.doesNotThrow(() => validateVerificationCommand(['npm', 'run', 'check']));
+  assert.doesNotThrow(() => validateVerificationCommand(['npm', 'test']));
+  assert.doesNotThrow(() => validateVerificationCommand(['python', '-m', 'pytest']));
+  assert.doesNotThrow(() => validateVerificationCommand(['go', 'test', './...']));
   assert.doesNotThrow(() => validateVerificationCommand(['git', 'diff', '--check']));
   assert.throws(() => validateVerificationCommand(['git', 'push']), /Only git diff --check/);
+  assert.throws(() => validateVerificationCommand(['npm', 'install']), /must use run or test/);
+  assert.throws(() => validateVerificationCommand(['python', 'script.py']), /limited to -m pytest/);
+  assert.throws(() => validateVerificationCommand(['npx', 'some-package']), /not allowed/);
   assert.throws(() => validateVerificationCommand(['bash', '-c', 'anything']), /not allowed/);
 });
 
