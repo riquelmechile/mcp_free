@@ -5,7 +5,6 @@ import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
 import {
   loadOrchestration,
-  runParallelInspection,
   validateInspectionCommand,
   type LaneInspectionRequest,
   type OrchestrationState
@@ -69,6 +68,7 @@ export interface LaneCoordinatorSummary {
 }
 
 const coordinatorRoot = path.join(config.stateDir, 'orchestration-workers');
+const orchestrationRoot = path.join(config.stateDir, 'orchestrations');
 const coordinatorLocks = new Map<string, Promise<void>>();
 const activeWorkers = new Map<string, Promise<void>>();
 const pendingWorkers: Array<{ orchestrationId: string; laneId: string }> = [];
@@ -79,9 +79,18 @@ function workerKey(orchestrationId: string, laneId: string): string {
   return `${orchestrationId}:${laneId}`;
 }
 
-function coordinatorPath(id: string): string {
+function validateOrchestrationId(id: string): void {
   if (!/^orch_[a-f0-9]{24}$/.test(id)) throw new Error('Invalid orchestration_id');
+}
+
+function coordinatorPath(id: string): string {
+  validateOrchestrationId(id);
   return path.join(coordinatorRoot, id, 'workers.json');
+}
+
+function orchestrationStatePath(id: string): string {
+  validateOrchestrationId(id);
+  return path.join(orchestrationRoot, id, 'state.json');
 }
 
 function within(candidate: string, root: string): boolean {
@@ -368,7 +377,7 @@ export function summarizeCoordinator(state: LaneCoordinatorState): LaneCoordinat
     revision: state.revision,
     status: state.status,
     updatedAt: state.updatedAt,
-    activeWorkerCount: activeWorkers.size,
+    activeWorkerCount: state.lanes.filter(lane => activeWorkers.has(workerKey(state.orchestrationId, lane.laneId))).length,
     queued: byStatus('queued'),
     running: byStatus('running'),
     completed: byStatus('completed'),
@@ -417,11 +426,23 @@ export async function requireLaneCompleted(orchestrationId: string, laneId: stri
 }
 
 export async function materializeLaneInspection(orchestrationId: string, laneId: string): Promise<OrchestrationState> {
-  const state = await loadOrchestration(orchestrationId);
-  const lane = state.lanes.find(candidate => candidate.id === laneId);
-  if (!lane) throw new Error(`Unknown lane_id: ${laneId}`);
-  if (lane.inspection) return state;
-  return runParallelInspection(orchestrationId, [{ laneId, commands: [['git', 'status', '--short']] }], 30_000);
+  return withCoordinatorLock(orchestrationId, async () => {
+    const orchestration = await loadOrchestration(orchestrationId);
+    const coordinator = await readRawCoordinator(orchestrationId);
+    if (!coordinator) throw new Error(`No lane coordinator exists for ${orchestrationId}`);
+    const worker = coordinator.lanes.find(candidate => candidate.laneId === laneId);
+    if (!worker) throw new Error(`Lane ${laneId} has not been queued`);
+    if (worker.status !== 'completed') throw new Error(`Lane ${laneId} is ${worker.status}; completed evidence is required`);
+    const lane = orchestration.lanes.find(candidate => candidate.id === laneId);
+    if (!lane) throw new Error(`Unknown lane_id: ${laneId}`);
+    lane.inspection = {
+      startedAt: worker.startedAt ?? worker.queuedAt,
+      completedAt: worker.completedAt ?? coordinator.updatedAt,
+      results: worker.results
+    };
+    await writeJsonAtomic(orchestrationStatePath(orchestrationId), orchestration);
+    return orchestration;
+  });
 }
 
 export async function assertAllLanesCompleted(orchestrationId: string): Promise<LaneCoordinatorState> {
