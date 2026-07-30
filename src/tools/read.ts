@@ -7,7 +7,7 @@ import { config } from '../config.js';
 import { captureScreenshot, clipboardRead, detectDesktopCapabilities, listWindows } from '../adapters/desktop.js';
 import { commandExists, runCommand } from '../core/command.js';
 import { resolveAllowedPath } from '../core/paths.js';
-import { getReceipt, listReceipts } from '../core/receipts.js';
+import { getReceipt, listReceipts, verifyReceiptChain } from '../core/receipts.js';
 import { describePolicy } from '../core/policy.js';
 import { errorResult, textResult } from './helpers.js';
 
@@ -226,7 +226,7 @@ export function registerReadTools(server: McpServer): void {
 
   server.registerTool('execution_receipts', {
     title: 'List execution receipts',
-    description: 'List recent immutable action receipts. Use these as structural evidence instead of claiming an action succeeded from narration alone.',
+    description: 'List recent hash-chained, tamper-evident action receipts. Use these as structural evidence instead of claiming an action succeeded from narration alone.',
     inputSchema: { limit: z.number().int().min(1).max(200).default(25) },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   }, async ({ limit }) => {
@@ -240,13 +240,30 @@ export function registerReadTools(server: McpServer): void {
 
   server.registerTool('execution_receipt_get', {
     title: 'Get execution receipt',
-    description: 'Retrieve one exact action receipt by ID.',
+    description: 'Retrieve one exact action receipt by ID and verify its content-derived identity.',
     inputSchema: { receipt_id: z.string().regex(/^rcpt_[a-f0-9]{24}$/) },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   }, async ({ receipt_id }) => {
     try {
       const receipt = await getReceipt(receipt_id);
       return textResult(`Loaded receipt ${receipt_id}.`, { receipt });
+    } catch (error) {
+      return errorResult(error);
+    }
+  });
+
+  server.registerTool('execution_receipts_verify', {
+    title: 'Verify execution receipt chain',
+    description: 'Verify sequence, previous-hash links, content-derived IDs, receipt files, audit entries, and the persisted chain head. Reports edits, deletions, reordering, missing files, and orphan files.',
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
+  }, async () => {
+    try {
+      const verification = await verifyReceiptChain();
+      return textResult(
+        verification.valid ? `Receipt chain verified: ${verification.entries} entries.` : `Receipt chain verification failed with ${verification.errors.length} error(s).`,
+        verification
+      );
     } catch (error) {
       return errorResult(error);
     }
