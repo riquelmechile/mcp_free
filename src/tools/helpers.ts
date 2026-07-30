@@ -1,9 +1,9 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
-export function textResult(summary: string, structuredContent?: Record<string, unknown>): CallToolResult {
+export function textResult(summary: string, structuredContent?: object): CallToolResult {
   return {
     content: [{ type: 'text', text: summary }],
-    ...(structuredContent ? { structuredContent } : {})
+    ...(structuredContent ? { structuredContent: structuredContent as Record<string, unknown> } : {})
   };
 }
 
