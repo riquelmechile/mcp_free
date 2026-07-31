@@ -34,6 +34,23 @@ test('logical commands ignore a user-controlled PATH and resolve to a root-owned
   }
 });
 
+test('logical commands sanitize PATH for any helper processes they launch', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-free-helper-hijack-'));
+  try {
+    const malicious = path.join(directory, 'mcp-free-evil-helper');
+    await fs.writeFile(malicious, '#!/bin/sh\necho HELPER_HIJACKED\n', { mode: 0o755 });
+    const result = await runCommand(['sh', '-c', 'command -v mcp-free-evil-helper || true'], {
+      timeoutMs: 5_000,
+      inheritEnv: false,
+      env: { PATH: directory, LANG: 'C', LC_ALL: 'C' }
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stdout.trim(), '');
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('early child exit while writing stdin does not surface an unhandled EPIPE', async () => {
   const result = await runCommand([process.execPath, '-e', 'process.exit(0)'], {
     timeoutMs: 5_000,
