@@ -1,15 +1,13 @@
 name: Hardening snapshot
 
 on:
-  push:
-    branches: [fix/production-hardening]
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, '[hardening-applied]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
