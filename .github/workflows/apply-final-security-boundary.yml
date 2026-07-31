@@ -22,7 +22,9 @@ jobs:
         with:
           node-version: 22
       - name: Apply migration
-        run: python3 scripts/apply-final-boundary.py
+        run: |
+          python3 scripts/apply-final-boundary.py
+          python3 scripts/fix-final-boundary-pass2.py
       - name: Refresh lockfile
         run: npm install --package-lock-only --ignore-scripts
       - name: Install reproducibly
