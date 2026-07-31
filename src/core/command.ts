@@ -4,6 +4,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
 
+const TRUSTED_SYSTEM_PATH = '/usr/local/bin:/usr/bin:/bin';
 const TRUSTED_EXECUTABLE_DIRECTORIES = ['/usr/bin', '/usr/local/bin'] as const;
 const TRUSTED_EXECUTABLE_ROOTS = ['/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/usr/local/bin', '/usr/local/lib'] as const;
 
@@ -104,15 +105,17 @@ export async function runCommand(
   } = {}
 ): Promise<CommandResult> {
   if (argv.length === 0) throw new Error('argv must not be empty');
+  const logicalExecutable = !path.isAbsolute(argv[0]!);
   const resolvedArgv = [await resolveRunExecutable(argv[0]!), ...argv.slice(1)];
   const cwd = path.resolve(options.cwd ?? config.home);
   const maxTimeoutMs = options.maxTimeoutMs ?? 15 * 60_000;
   const timeoutMs = Math.min(options.timeoutMs ?? config.commandTimeoutMs, maxTimeoutMs);
   const maxOutputBytes = Math.min(options.maxOutputBytes ?? config.maxOutputBytes, 16 * 1024 * 1024);
   const started = Date.now();
-  const childEnvironment = options.inheritEnv === false
+  const childEnvironment: NodeJS.ProcessEnv = options.inheritEnv === false
     ? { ...(options.env ?? {}) }
     : { ...process.env, ...(options.env ?? {}) };
+  if (logicalExecutable) childEnvironment.PATH = TRUSTED_SYSTEM_PATH;
 
   return await new Promise<CommandResult>((resolve, reject) => {
     const child = spawn(resolvedArgv[0]!, resolvedArgv.slice(1), {
