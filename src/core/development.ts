@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
-import { runCommand } from './command.js';
 import {
   canonicalizeInspectionCommand,
   canonicalizeVerificationCommand,
@@ -159,16 +158,34 @@ async function saveOrchestration(state: OrchestrationState): Promise<void> {
   await writeJsonAtomic(orchestrationPath(state.id), state);
 }
 
+async function findStandardGitRoot(cwd: string): Promise<string> {
+  let cursor = await fs.realpath(cwd);
+  const metadata = await fs.stat(cursor);
+  if (!metadata.isDirectory()) cursor = path.dirname(cursor);
+  while (true) {
+    const gitMetadata = path.join(cursor, '.git');
+    try {
+      const gitStat = await fs.lstat(gitMetadata);
+      if (gitStat.isDirectory()) return cursor;
+      if (gitStat.isFile()) {
+        throw new Error('Linked Git worktrees and submodules are rejected because their metadata lives outside the sandbox root');
+      }
+      throw new Error(`Unsupported Git metadata entry: ${gitMetadata}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) throw new Error('Development orchestration requires a standard Git worktree with a .git directory');
+    cursor = parent;
+  }
+}
+
 export async function captureGitSnapshot(cwd: string): Promise<GitSnapshot> {
-  const git = await resolveTrustedExecutable('git');
-  const hostEnvironment = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' };
-  const rootResult = await runCommand([git, '-c', 'core.fsmonitor=false', 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: 10_000, inheritEnv: false, env: hostEnvironment });
-  if (rootResult.exitCode !== 0) throw new Error(`Development orchestration requires a Git worktree: ${cleanOutput(rootResult)}`);
-  const root = await fs.realpath(rootResult.stdout.trim());
+  const root = await findStandardGitRoot(cwd);
   const logicalCommands = [
     ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
     ['git', 'rev-parse', '--verify', 'HEAD'],
-    ['git', 'status', '--porcelain', '--untracked-files', 'all'],
+    ['git', 'status', '--porcelain=v1', '--untracked-files=all'],
     ['git', 'diff', '--stat']
   ];
   const canonical = await Promise.all(logicalCommands.map(command => canonicalizeInspectionCommand(command, root)));
@@ -178,10 +195,13 @@ export async function captureGitSnapshot(cwd: string): Promise<GitSnapshot> {
   const status = results[2];
   const diffStat = results[3];
   if (!branch || !head || !status || !diffStat) throw new Error('Incomplete Git snapshot results');
+  for (const result of results) {
+    if (result.exitCode !== 0 || result.timedOut) throw new Error(`Sandboxed Git snapshot failed: ${cleanOutput(result)}`);
+  }
   return {
     root,
     branch: branch.stdout.trim() || '(detached)',
-    head: head.exitCode === 0 ? head.stdout.trim() : null,
+    head: head.stdout.trim() || null,
     status: status.stdout.trim(),
     diffStat: diffStat.stdout.trim()
   };
@@ -328,15 +348,6 @@ export async function cleanupOrchestrations(olderThanMs: number): Promise<string
 export const validateInspectionCommand = validateInspectionCommandPolicy;
 export const validateVerificationCommand = validateVerificationCommandPolicy;
 
-const INSPECTION_ENV: Record<string, string> = {
-  PATH: '/usr/bin:/bin',
-  LANG: 'C',
-  LC_ALL: 'C',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_OPTIONAL_LOCKS: '0',
-  NO_COLOR: '1'
-};
 const SENSITIVE_ARG = /(^|\/)(\.env(?:\.|$)|\.ssh|\.gnupg|secrets?|credentials?)(\/|$)|\.(?:pem|key)$/i;
 
 export async function recordLaneReport(id: string, input: {
@@ -438,9 +449,15 @@ export async function applyOrchestrationPatch(id: string, patchText: string, all
         throw new Error(`Patch touches pre-existing dirty paths: ${overlap.join(', ')}. Set allow_touch_dirty=true only after reviewing those exact files.`);
       }
       const git = await resolveTrustedExecutable('git');
-      const check = await runCommand([git, 'apply', '--check', '--', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 60_000, inheritEnv: false, env: INSPECTION_ENV });
+      const check = await runVerificationCommand(state.root, [git, 'apply', '--check', '--', '-'], {
+        stdin: patchText,
+        timeoutMs: 60_000
+      });
       if (check.exitCode !== 0 || check.timedOut) throw new Error(`git apply --check failed: ${cleanOutput(check)}`);
-      const apply = await runCommand([git, 'apply', '--whitespace=nowarn', '--', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 120_000, inheritEnv: false, env: INSPECTION_ENV });
+      const apply = await runVerificationCommand(state.root, [git, 'apply', '--whitespace=nowarn', '--', '-'], {
+        stdin: patchText,
+        timeoutMs: 120_000
+      });
       if (apply.exitCode !== 0 || apply.timedOut) throw new Error(`git apply failed after a successful check: ${cleanOutput(apply)}`);
       const after = await captureGitSnapshot(state.root);
       state.status = 'applied';

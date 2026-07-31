@@ -25,11 +25,11 @@ export interface AnchoredFileIdentity {
 
 function identityFromStat(metadata: Awaited<ReturnType<FileHandle['stat']>>): AnchoredFileIdentity {
   return {
-    dev: metadata.dev,
-    ino: metadata.ino,
-    mode: metadata.mode,
-    size: metadata.size,
-    mtimeMs: metadata.mtimeMs
+    dev: Number(metadata.dev),
+    ino: Number(metadata.ino),
+    mode: Number(metadata.mode),
+    size: Number(metadata.size),
+    mtimeMs: Number(metadata.mtimeMs)
   };
 }
 

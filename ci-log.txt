@@ -1,0 +1,262 @@
+
+> mcp-free-cachyos@0.6.0 check
+> npm run typecheck && npm test
+
+
+> mcp-free-cachyos@0.6.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+
+> mcp-free-cachyos@0.6.0 test
+> node --test --import tsx tests/*.test.ts
+
+TAP version 13
+# Subtest: inspection executables must be logical names, never attacker-controlled paths
+ok 1 - inspection executables must be logical names, never attacker-controlled paths
+  ---
+  duration_ms: 1.467877
+  type: 'test'
+  ...
+# Subtest: inspection grammar rejects execution, output, config, and external-path options
+ok 2 - inspection grammar rejects execution, output, config, and external-path options
+  ---
+  duration_ms: 1.160945
+  type: 'test'
+  ...
+# Subtest: known read-only command shapes remain accepted
+ok 3 - known read-only command shapes remain accepted
+  ---
+  duration_ms: 0.69183
+  type: 'test'
+  ...
+# Subtest: canonical inspection resolves a root-owned system binary and preserves only safe arguments
+ok 4 - canonical inspection resolves a root-owned system binary and preserves only safe arguments
+  ---
+  duration_ms: 12.53432
+  type: 'test'
+  ...
+# Subtest: verification executable and grammar cannot be replaced or widened
+ok 5 - verification executable and grammar cannot be replaced or widened
+  ---
+  duration_ms: 1.842245
+  type: 'test'
+  ...
+# Subtest: command timeout terminates descendant processes, not only the direct child
+ok 6 - command timeout terminates descendant processes, not only the direct child
+  ---
+  duration_ms: 162.742808
+  type: 'test'
+  ...
+# Subtest: abort signal cancels the complete command process group
+ok 7 - abort signal cancels the complete command process group
+  ---
+  duration_ms: 155.591624
+  type: 'test'
+  ...
+# Subtest: non-loopback MCP binding requires a bearer token
+ok 8 - non-loopback MCP binding requires a bearer token
+  ---
+  duration_ms: 1.476302
+  type: 'test'
+  ...
+# Subtest: sandbox CI bypass cannot be enabled outside GitHub Actions
+ok 9 - sandbox CI bypass cannot be enabled outside GitHub Actions
+  ---
+  duration_ms: 152.113753
+  type: 'test'
+  ...
+# Subtest: workspace refuses to start when verification sandbox is disabled
+ok 10 - workspace refuses to start when verification sandbox is disabled
+  ---
+  duration_ms: 124.697441
+  type: 'test'
+  ...
+# Subtest: verification network remains disabled outside full mode
+ok 11 - verification network remains disabled outside full mode
+  ---
+  duration_ms: 187.429708
+  type: 'test'
+  ...
+# Subtest: creates three distinct ChatGPT-controlled logical lanes
+ok 12 - creates three distinct ChatGPT-controlled logical lanes
+  ---
+  duration_ms: 2.916879
+  type: 'test'
+  ...
+# Subtest: inspection commands remain read-only and project-local
+ok 13 - inspection commands remain read-only and project-local
+  ---
+  duration_ms: 2.022681
+  type: 'test'
+  ...
+# Subtest: extracts bounded patch paths and rejects unsafe patch types
+ok 14 - extracts bounded patch paths and rejects unsafe patch types
+  ---
+  duration_ms: 1.347993
+  type: 'test'
+  ...
+# Subtest: parses pre-existing dirty paths for overlap protection
+ok 15 - parses pre-existing dirty paths for overlap protection
+  ---
+  duration_ms: 0.279562
+  type: 'test'
+  ...
+# Subtest: verification commands are bounded to known project checks
+ok 16 - verification commands are bounded to known project checks
+  ---
+  duration_ms: 0.792207
+  type: 'test'
+  ...
+# Subtest: auto-detects bounded package verification scripts
+ok 17 - auto-detects bounded package verification scripts
+  ---
+  duration_ms: 18.510752
+  type: 'test'
+  ...
+# Subtest: running lane process groups can be cancelled and explicitly resumed
+ok 18 - running lane process groups can be cancelled and explicitly resumed
+  ---
+  duration_ms: 471.49408
+  type: 'test'
+  ...
+# Subtest: a worker left running by another service instance is marked interrupted
+ok 19 - a worker left running by another service instance is marked interrupted
+  ---
+  duration_ms: 232.723676
+  type: 'test'
+  ...
+# Subtest: dispatch returns immediately while three persistent workers finish independently
+ok 20 - dispatch returns immediately while three persistent workers finish independently
+  ---
+  duration_ms: 410.576593
+  type: 'test'
+  ...
+# Subtest: terminal lane evidence cannot be changed without invalidating its receipt binding
+ok 21 - terminal lane evidence cannot be changed without invalidating its receipt binding
+  ---
+  duration_ms: 255.788175
+  type: 'test'
+  ...
+# Subtest: shared orchestration lock preserves simultaneous materialization and reports
+ok 22 - shared orchestration lock preserves simultaneous materialization and reports
+  ---
+  duration_ms: 326.769907
+  type: 'test'
+  ...
+# Subtest: persistent coordinator completes patch, leased verification, and finalization
+ok 23 - persistent coordinator completes patch, leased verification, and finalization
+  ---
+  duration_ms: 551.635253
+  type: 'test'
+  ...
+# Subtest: physical allowed roots reject symlink escapes, Git metadata writes, and credential-like paths
+ok 24 - physical allowed roots reject symlink escapes, Git metadata writes, and credential-like paths
+  ---
+  duration_ms: 49.664508
+  type: 'test'
+  ...
+# Subtest: classifies harmless inspection as tier zero
+ok 25 - classifies harmless inspection as tier zero
+  ---
+  duration_ms: 3.087513
+  type: 'test'
+  ...
+# Subtest: classifies package and system changes as tier two
+ok 26 - classifies package and system changes as tier two
+  ---
+  duration_ms: 1.152458
+  type: 'test'
+  ...
+# Subtest: classifies destructive shell as tier three
+ok 27 - classifies destructive shell as tier three
+  ---
+  duration_ms: 0.145762
+  type: 'test'
+  ...
+# Subtest: requires explicit confirmation for tier two and three
+ok 28 - requires explicit confirmation for tier two and three
+  ---
+  duration_ms: 0.685889
+  type: 'test'
+  ...
+# Subtest: receipt verification and append initialize a completely missing state directory
+ok 29 - receipt verification and append initialize a completely missing state directory
+  ---
+  duration_ms: 67.288422
+  type: 'test'
+  ...
+# Subtest: writes a content-bound hash chain and detects receipt tampering
+ok 30 - writes a content-bound hash chain and detects receipt tampering
+  ---
+  duration_ms: 90.5409
+  type: 'test'
+  ...
+# Subtest: failed verification releases lease and a later verification reacquires it
+ok 31 - failed verification releases lease and a later verification reacquires it
+  ---
+  duration_ms: 914.177761
+  type: 'test'
+  ...
+# Subtest: sandbox command clears environment, removes network, masks Git config, and exposes only the worktree writable
+ok 32 - sandbox command clears environment, removes network, masks Git config, and exposes only the worktree writable
+  ---
+  duration_ms: 32.987682
+  type: 'test'
+  ...
+# Subtest: inspection sandbox mounts the project read-only
+ok 33 - inspection sandbox mounts the project read-only
+  ---
+  duration_ms: 4.515158
+  type: 'test'
+  ...
+# Subtest: non-Git inspection cannot enter Git metadata
+ok 34 - non-Git inspection cannot enter Git metadata
+  ---
+  duration_ms: 0.939331
+  type: 'test'
+  ...
+# Subtest: runCommand can use a clean environment without inheriting MCP secrets
+ok 35 - runCommand can use a clean environment without inheriting MCP secrets
+  ---
+  duration_ms: 10.266912
+  type: 'test'
+  ...
+# Subtest: bubblewrap smoke test isolates an actual temporary worktree when available
+ok 36 - bubblewrap smoke test isolates an actual temporary worktree when available # SKIP GitHub hosted runners block the user namespaces Bubblewrap requires; production argv is verified separately
+  ---
+  duration_ms: 0.436944
+  type: 'test'
+  ...
+# Subtest: descriptor-anchored workspace primitives reject aliases and replace files atomically
+ok 37 - descriptor-anchored workspace primitives reject aliases and replace files atomically
+  ---
+  duration_ms: 237.511156
+  type: 'test'
+  ...
+# Subtest: workspace mode exposes no generic command runner or coding-agent launcher
+ok 38 - workspace mode exposes no generic command runner or coding-agent launcher
+  ---
+  duration_ms: 10.473397
+  type: 'test'
+  ...
+# Subtest: worktree fingerprint changes for unstaged, untracked, and index-only bytes
+ok 39 - worktree fingerprint changes for unstaged, untracked, and index-only bytes
+  ---
+  duration_ms: 172.948055
+  type: 'test'
+  ...
+# Subtest: worktree leases block unrelated writes and are owner-scoped
+ok 40 - worktree leases block unrelated writes and are owner-scoped
+  ---
+  duration_ms: 37.054969
+  type: 'test'
+  ...
+1..40
+# tests 40
+# suites 0
+# pass 39
+# fail 0
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 3484.934218

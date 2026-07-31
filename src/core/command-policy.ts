@@ -165,8 +165,9 @@ function analyzeGit(argv: string[]): string[] {
 
   if (subcommand === 'status') {
     const parsed = parseOptions(args, {
-      noValue: new Set(['--short', '-s', '--branch', '-b', '--porcelain', '--ignored', '--no-ahead-behind']),
-      value: new Set(['--untracked-files'])
+      noValue: new Set(['--short', '-s', '--branch', '-b', '--porcelain', '--ignored', '--no-ahead-behind', '-z']),
+      value: new Set(['--untracked-files']),
+      compact: [/^--porcelain(?:=v1|=v2)?$/]
     });
     if (parsed.positionals.length > 0) throw new Error('git status paths must follow --');
     assertPaths(parsed.tail);

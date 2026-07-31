@@ -26,7 +26,7 @@ test('non-loopback MCP binding requires a bearer token', () => {
 });
 
 test('sandbox CI bypass cannot be enabled outside GitHub Actions', async () => {
-  const environment = {
+  const environment: NodeJS.ProcessEnv = {
     ...process.env,
     MCP_MODE: 'workspace',
     MCP_VERIFICATION_SANDBOX: '1',
@@ -41,7 +41,7 @@ test('sandbox CI bypass cannot be enabled outside GitHub Actions', async () => {
 
 test('workspace refuses to start when verification sandbox is disabled', async () => {
   const script = "import('./src/config.ts').then(() => process.exit(2)).catch(error => { console.error(error.message); process.exit(0); })";
-  const environment = {
+  const environment: NodeJS.ProcessEnv = {
     ...process.env,
     MCP_MODE: 'workspace',
     MCP_VERIFICATION_SANDBOX: '0'
