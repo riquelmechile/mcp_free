@@ -83,7 +83,10 @@ else
   grep -q '^MCP_VERIFICATION_NETWORK=' "$ENV_FILE" || printf 'MCP_VERIFICATION_NETWORK=0\n' >> "$ENV_FILE"
 fi
 
-SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
+SERVICE_PATH="/usr/local/bin:/usr/bin:/bin"
+if [[ "$MODE" == "full" ]]; then
+  SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:$SERVICE_PATH"
+fi
 cat > "$UNIT_DIR/mcp-free.service" <<UNIT
 [Unit]
 Description=MCP Free computer-control server for CachyOS
