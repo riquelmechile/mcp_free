@@ -10,11 +10,21 @@ EnvironmentFile=__ENV_FILE__
 ExecStart=__NODE__ __APP_DIR__/dist/server.js
 Restart=on-failure
 RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=default.target
