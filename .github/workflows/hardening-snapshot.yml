@@ -3,6 +3,7 @@ name: Hardening snapshot
 on:
   push:
     branches: [fix/production-hardening]
+  pull_request:
 
 permissions:
   contents: read
