@@ -1,5 +1,6 @@
 import { readlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
 import { runCommand } from './command.js';
@@ -54,6 +55,7 @@ export function buildSandboxArgv(
     '--tmpfs', '/tmp',
     '--dir', '/tmp/home',
     options.writable ? '--bind' : '--ro-bind', root, '/workspace',
+    '--ro-bind', path.join(root, '.git'), '/workspace/.git',
     '--chdir', '/workspace',
     '--setenv', 'PATH', '/usr/bin:/bin',
     '--setenv', 'HOME', '/tmp/home',
