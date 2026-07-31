@@ -16,6 +16,8 @@ async function processIsAlive(pid: number): Promise<boolean> {
 }
 
 async function withReceiptFilesystemLock<T>(operation: () => Promise<T>): Promise<T> {
+  await fs.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(config.stateDir, 0o700);
   const deadline = Date.now() + 60_000;
   while (true) {
     try {
