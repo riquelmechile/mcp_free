@@ -8,6 +8,7 @@ permissions:
 
 env:
   MCP_SANDBOX_CI_SHARED_NETWORK: '1'
+  MCP_SANDBOX_CI_BYPASS: '1'
 
 jobs:
   apply:
@@ -21,15 +22,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap ripgrep jq fd-find
-          sudo ln -sf "$(command -v npm)" /usr/local/bin/npm
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Expose setup-node npm through a trusted root-owned path
+        run: sudo ln -sf "$(command -v npm)" /usr/local/bin/npm
       - name: Apply migration
         run: |
           python3 scripts/apply-final-boundary.py
           python3 scripts/fix-final-boundary-pass2.py
           python3 scripts/fix-final-boundary-pass3.py
+          python3 scripts/fix-final-boundary-pass4.py
       - name: Refresh lockfile
         run: npm install --package-lock-only --ignore-scripts
       - name: Install reproducibly
