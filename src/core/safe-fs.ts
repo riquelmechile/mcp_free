@@ -18,6 +18,9 @@ export async function assertOpenedDescriptorAllowed(
   const metadata = await handle.stat();
   if (options.directory === true && !metadata.isDirectory()) throw new Error('Expected an opened directory');
   if (options.directory !== true && !metadata.isFile()) throw new Error('Expected an opened regular file');
+  if (metadata.isFile() && metadata.nlink !== 1) {
+    throw new Error('Files with multiple hard links are blocked because their other names may escape the allowed root');
+  }
   const opened = await openedPhysicalPath(handle);
   if (options.expectedPath) {
     const expected = await fs.realpath(options.expectedPath);
@@ -126,6 +129,7 @@ export async function renameAnchoredPath(source: string, destination: string): P
     const destinationAnchored = `${descriptorPath(destinationParent)}/${destinationName}`;
     const sourceMetadata = await fs.lstat(sourceAnchored);
     if (sourceMetadata.isSymbolicLink()) throw new Error('Moving symbolic links is blocked');
+    if (sourceMetadata.isFile() && sourceMetadata.nlink !== 1) throw new Error('Moving files with multiple hard links is blocked');
     await revalidateAllowedPath(await fs.realpath(sourceAnchored), { mustExist: true, write: true });
     await fs.rename(sourceAnchored, destinationAnchored);
   } finally {
