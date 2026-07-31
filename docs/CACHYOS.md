@@ -2,40 +2,34 @@
 
 ## KDE Plasma y Wayland
 
-CachyOS suele usar KDE Plasma sobre Wayland. En ese entorno:
+- `spectacle`: capturas.
+- `wl-copy` / `wl-paste`: portapapeles.
+- `kdotool`: consulta/foco de ventanas en KWin.
+- `ydotool`: mouse y teclado mediante `/dev/uinput`.
+- `xdotool`: fallback para X11.
 
-- `spectacle` captura pantalla.
-- `wl-copy`/`wl-paste` operan el portapapeles.
-- `kdotool` consulta y activa ventanas mediante KWin.
-- `ydotool` inyecta mouse y teclado mediante `/dev/uinput`.
-- `xdotool` sólo es fallback útil en una sesión X11.
+`setup-desktop-control.sh` configura `ydotoold`, grupo y regla udev. Tras añadir el usuario al grupo, cierre sesión y vuelva a entrar.
 
-`ydotool` requiere el daemon persistente `ydotoold` y permisos sobre `/dev/uinput`. El script `setup-desktop-control.sh` crea un grupo dedicado `uinput`, una regla udev y activa el servicio de usuario incluido por el paquete Arch. La pertenencia al grupo requiere cerrar sesión y volver a entrar.
-
-## Variables de sesión gráfica
-
-El servicio MCP corre como servicio systemd de usuario, no como root. El instalador importa:
-
-- `DISPLAY`
-- `WAYLAND_DISPLAY`
-- `XDG_CURRENT_DESKTOP`
-- `XDG_SESSION_TYPE`
-- `DBUS_SESSION_BUS_ADDRESS`
-
-Tras cambiar de sesión gráfica, ejecute:
+## Variables de sesión
 
 ```bash
-systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE DBUS_SESSION_BUS_ADDRESS
-systemctl --user restart mcp-free
+systemctl --user import-environment \
+  DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE DBUS_SESSION_BUS_ADDRESS
+systemctl --user restart mcp-free.service
 ```
 
-## Gentle AI 2.2.2
+## Instalación segura
 
-Instalación exacta reproducible:
+La instalación predeterminada es `observe`:
 
 ```bash
-go install github.com/gentleman-programming/gentle-ai/v2/cmd/gentle-ai@v2.2.2
-gentle-ai version
+./scripts/install-cachyos.sh --observe --desktop-control
 ```
 
-Después configure Gentle AI normalmente para OpenCode/Codex y ejecute `gentle-ai doctor`. MCP Free no sustituye esos agentes; les agrega una ruta para que ChatGPT web pueda invocar herramientas del computador y aplica el mismo enfoque de evidencia/recibos.
+Después de revisar `/healthz` y las herramientas expuestas, habilite desarrollo:
+
+```bash
+./scripts/install-cachyos.sh --workspace --desktop-control
+```
+
+No instale ni configure Gentle AI, OpenCode, Codex CLI, Claude Code o Gemini CLI para este flujo. ChatGPT es el único modelo; los tres carriles son workers locales deterministas.

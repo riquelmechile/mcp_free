@@ -375,41 +375,6 @@ const INSPECTION_ENV: Record<string, string> = {
   LANG: 'C'
 };
 
-export async function runParallelInspection(id: string, requests: LaneInspectionRequest[], timeoutMs: number): Promise<OrchestrationState> {
-  return withOrchestrationLock(id, async () => {
-    const state = await loadOrchestration(id);
-    if (state.status !== 'active') throw new Error(`Parallel inspection requires active status; current status is ${state.status}`);
-    if (requests.length < 1 || requests.length > 3) throw new Error('Between 1 and 3 lane requests are required');
-    const unique = new Set(requests.map(request => request.laneId));
-    if (unique.size !== requests.length) throw new Error('lane_id values must be unique within one parallel call');
-    for (const request of requests) {
-      const lane = state.lanes.find(candidate => candidate.id === request.laneId);
-      if (!lane) throw new Error(`Unknown lane_id: ${request.laneId}`);
-      if (request.commands.length < 1 || request.commands.length > 8) throw new Error('Each lane requires between 1 and 8 inspection commands');
-      for (const argv of request.commands) {
-        validateInspectionCommand(argv);
-        await assertExistingArgumentsStayInProject(state.root, argv);
-      }
-    }
-    const completed = await Promise.all(requests.map(async request => {
-      const startedAt = new Date().toISOString();
-      const results: CommandResult[] = [];
-      for (const argv of request.commands) {
-        results.push(await runCommand(argv, { cwd: state.root, timeoutMs, maxTimeoutMs: config.developmentTimeoutMs, env: INSPECTION_ENV }));
-      }
-      return { laneId: request.laneId, inspection: { startedAt, completedAt: new Date().toISOString(), results } satisfies LaneInspection };
-    }));
-    for (const item of completed) {
-      const lane = state.lanes.find(candidate => candidate.id === item.laneId);
-      if (!lane) throw new Error(`Lane disappeared during inspection: ${item.laneId}`);
-      lane.inspection = item.inspection;
-      lane.inspectionSha256 = sha256(JSON.stringify(item.inspection));
-    }
-    await saveOrchestration(state);
-    return state;
-  });
-}
-
 export async function recordLaneReport(id: string, input: {
   laneId: string;
   summary: string;
@@ -547,38 +512,44 @@ export async function verifyOrchestration(id: string, commands: string[][], time
   return withOrchestrationLock(id, async () => {
     const state = await loadOrchestration(id);
     if (state.status !== 'applied' && state.status !== 'verification_failed') throw new Error(`Verification requires an applied patch; current status is ${state.status}`);
-    await assertWorktreeLease(state.root, state.id);
-    commands.forEach(validateVerificationCommand);
-    for (const argv of commands) await assertExistingArgumentsStayInProject(state.root, argv);
-    const current = await captureGitSnapshot(state.root);
-    if (current.head !== state.baseline.head || current.branch !== state.baseline.branch) throw new Error('Git branch or HEAD changed during orchestration');
+    await acquireWorktreeLease(state.root, state.id);
+    try {
+      commands.forEach(validateVerificationCommand);
+      for (const argv of commands) await assertExistingArgumentsStayInProject(state.root, argv);
+      const current = await captureGitSnapshot(state.root);
+      if (current.head !== state.baseline.head || current.branch !== state.baseline.branch) throw new Error('Git branch or HEAD changed during orchestration');
 
-    const preFingerprint = await computeWorktreeFingerprint(state.root);
-    const diffCheck = await runCommand(['git', 'diff', '--check', '--no-ext-diff'], { cwd: state.root, timeoutMs: 60_000, env: INSPECTION_ENV });
-    const results: CommandResult[] = [];
-    for (const argv of commands) {
-      results.push(await runCommand(argv, { cwd: state.root, timeoutMs, maxTimeoutMs: config.developmentTimeoutMs, env: { NO_COLOR: '1' } }));
+      const preFingerprint = await computeWorktreeFingerprint(state.root);
+      const diffCheck = await runCommand(['git', 'diff', '--check', '--no-ext-diff'], { cwd: state.root, timeoutMs: 60_000, env: INSPECTION_ENV });
+      const results: CommandResult[] = [];
+      for (const argv of commands) {
+        results.push(await runCommand(argv, { cwd: state.root, timeoutMs, maxTimeoutMs: config.developmentTimeoutMs, env: { NO_COLOR: '1' } }));
+      }
+      const postFingerprint = await computeWorktreeFingerprint(state.root);
+      const worktreeStable = preFingerprint === postFingerprint;
+      const success = worktreeStable
+        && diffCheck.exitCode === 0
+        && !diffCheck.timedOut
+        && results.every(result => result.exitCode === 0 && !result.timedOut && !result.cancelled);
+      state.verification = {
+        completedAt: new Date().toISOString(),
+        success,
+        diffCheck,
+        commands,
+        results,
+        preFingerprint,
+        postFingerprint,
+        worktreeStable
+      };
+      state.status = success ? 'verified' : 'verification_failed';
+      await saveOrchestration(state);
+      if (success) await writeVerifiedWorktreeFingerprint(state, postFingerprint);
+      else await releaseWorktreeLease(state.root, state.id);
+      return state;
+    } catch (error) {
+      await releaseWorktreeLease(state.root, state.id);
+      throw error;
     }
-    const postFingerprint = await computeWorktreeFingerprint(state.root);
-    const worktreeStable = preFingerprint === postFingerprint;
-    const success = worktreeStable
-      && diffCheck.exitCode === 0
-      && !diffCheck.timedOut
-      && results.every(result => result.exitCode === 0 && !result.timedOut && !result.cancelled);
-    state.verification = {
-      completedAt: new Date().toISOString(),
-      success,
-      diffCheck,
-      commands,
-      results,
-      preFingerprint,
-      postFingerprint,
-      worktreeStable
-    };
-    state.status = success ? 'verified' : 'verification_failed';
-    await saveOrchestration(state);
-    if (success) await writeVerifiedWorktreeFingerprint(state, postFingerprint);
-    return state;
   });
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "mcp-free-cachyos",
-  "version": "0.4.0",
-  "description": "ChatGPT-native computer control with a persistent three-lane development coordinator for a private CachyOS MCP server.",
+  "version": "0.5.0",
+  "description": "Hardened ChatGPT-native computer control with evidence-bound persistent development workers for CachyOS.",
   "repository": "https://github.com/riquelmechile/mcp_free",
   "license": "MIT",
   "keywords": [
@@ -17,8 +17,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "MCP Free CachyOS",
-    "shortDescription": "Let ChatGPT orchestrate persistent local workers on CachyOS",
-    "longDescription": "ChatGPT remains the sole reasoning model while a resident private MCP coordinator queues up to three local inspection workers, persists command-level progress, exposes status/wait/result tools, applies bounded patches, verifies exact worktree bytes, and produces tamper-evident receipts.",
+    "shortDescription": "Orchestrate bounded, evidence-bound work on CachyOS",
+    "longDescription": "ChatGPT remains the sole reasoning model. A private MCP coordinator runs up to three deterministic inspection workers, binds terminal outputs to hash-chained receipts, protects physical path boundaries and active worktrees, applies bounded patches, and verifies complete Git/worktree bytes.",
     "developerName": "riquelmechile",
     "category": "Productivity",
     "capabilities": [
@@ -26,9 +26,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Inspect my CachyOS computer and report its current state without changing anything.",
-      "Act as the only development model. Dispatch three persistent local lanes, observe them with status or wait, and process each completed result while the others continue.",
-      "Complete this development task through the persistent orchestration flow, preserve existing work, verify the outcome, and include every execution receipt."
+      "Inspect my CachyOS computer in observe mode and report its state without changing anything.",
+      "Act as the only development model. Dispatch explore, design, and review workers, then process each evidence-bound result while the others continue.",
+      "Recover or cancel persistent orchestration state as needed, preserve existing work, verify exact bytes, and include all receipts."
     ]
   }
 }

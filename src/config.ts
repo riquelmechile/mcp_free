@@ -15,7 +15,7 @@ function intEnv(name: string, fallback: number): number {
 }
 
 function modeEnv(): AccessMode {
-  const value = process.env.MCP_MODE ?? 'workspace';
+  const value = process.env.MCP_MODE ?? 'observe';
   if (value !== 'observe' && value !== 'workspace' && value !== 'full') {
     throw new Error('MCP_MODE must be observe, workspace, or full');
   }
@@ -25,6 +25,12 @@ function modeEnv(): AccessMode {
 function pathList(value: string | undefined, fallback: string[]): string[] {
   const items = value ? value.split(':') : fallback;
   return [...new Set(items.map(item => path.resolve(item.replace(/^~(?=\/|$)/, home))).filter(Boolean))];
+}
+
+export function assertSafeNetworkBinding(host: string, authToken: string | null): void {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const loopback = normalized === 'localhost' || normalized === '::1' || /^127\./.test(normalized);
+  if (!loopback && !authToken) throw new Error('MCP_AUTH_TOKEN is required when MCP_HOST is not loopback');
 }
 
 export const config = {

@@ -14,24 +14,82 @@ async function assertHealthyReceiptChain(): Promise<void> {
   if (!verification.valid) throw new Error(`Receipt chain is invalid; refusing workspace write: ${verification.errors.join('; ')}`);
 }
 
-async function writeFileNoFollow(target: string, content: string, overwrite: boolean): Promise<void> {
+async function assertOpenedPathMatches(target: string, fd: number): Promise<void> {
+  const [opened, expected] = await Promise.all([
+    fs.realpath(`/proc/self/fd/${fd}`),
+    fs.realpath(target)
+  ]);
+  if (opened !== expected) throw new Error(`Opened file no longer matches validated path: ${target}`);
+  await revalidateAllowedPath(target, { mustExist: true, write: true });
+}
+
+export async function writeFileNoFollow(target: string, content: string, overwrite: boolean): Promise<void> {
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW
-    | (overwrite ? constants.O_TRUNC : constants.O_EXCL);
+    | (overwrite ? 0 : constants.O_EXCL);
   const handle = await fs.open(target, flags, 0o600);
   try {
-    await handle.writeFile(content, { encoding: 'utf8' });
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error('filesystem_write requires a regular file');
+    await assertOpenedPathMatches(target, handle.fd);
+    if (overwrite) await handle.truncate(0);
+    const buffer = Buffer.from(content, 'utf8');
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset, offset);
+      if (bytesWritten <= 0) throw new Error(`Failed to write bytes to ${target}`);
+      offset += bytesWritten;
+    }
     await handle.sync();
   } finally {
     await handle.close();
   }
 }
 
-async function readFileNoFollow(target: string): Promise<string> {
-  const handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+export async function patchFileNoFollow(target: string, expected: string, replacement: string): Promise<{ original: string; updated: string }> {
+  const handle = await fs.open(target, constants.O_RDWR | constants.O_NOFOLLOW);
   try {
-    return await handle.readFile('utf8');
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error('filesystem_patch requires a regular file');
+    await assertOpenedPathMatches(target, handle.fd);
+    const original = await handle.readFile('utf8');
+    const matches = original.split(expected).length - 1;
+    if (matches !== 1) throw new Error(`Expected text must occur exactly once; found ${matches} matches`);
+    const updated = original.replace(expected, replacement);
+    await revalidateAllowedPath(target, { mustExist: true, write: true });
+    await handle.truncate(0);
+    const buffer = Buffer.from(updated, 'utf8');
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset, offset);
+      if (bytesWritten <= 0) throw new Error(`Failed to write patched bytes to ${target}`);
+      offset += bytesWritten;
+    }
+    await handle.sync();
+    return { original, updated };
   } finally {
     await handle.close();
+  }
+}
+
+export async function renameAnchored(from: string, to: string): Promise<void> {
+  const [fromParent, toParent] = await Promise.all([
+    fs.realpath(path.dirname(from)),
+    fs.realpath(path.dirname(to))
+  ]);
+  const [fromHandle, toHandle] = await Promise.all([
+    fs.open(fromParent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW),
+    fs.open(toParent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  ]);
+  try {
+    await Promise.all([
+      revalidateAllowedPath(from, { mustExist: true, write: true }),
+      revalidateAllowedPath(to, { write: true })
+    ]);
+    const source = `/proc/self/fd/${fromHandle.fd}/${path.basename(from)}`;
+    const destination = `/proc/self/fd/${toHandle.fd}/${path.basename(to)}`;
+    await fs.rename(source, destination);
+  } finally {
+    await Promise.all([fromHandle.close(), toHandle.close()]);
   }
 }
 
@@ -88,12 +146,7 @@ export function registerWorkspaceTools(server: McpServer): void {
       await assertHealthyReceiptChain();
       const target = await resolveAllowedPath(inputPath, { mustExist: true, write: true });
       await assertPathNotLeased(target);
-      const original = await readFileNoFollow(target);
-      const matches = original.split(expected).length - 1;
-      if (matches !== 1) throw new Error(`Expected text must occur exactly once; found ${matches} matches`);
-      const updated = original.replace(expected, replacement);
-      await revalidateAllowedPath(target, { mustExist: true, write: true });
-      await writeFileNoFollow(target, updated, true);
+      const { original, updated } = await patchFileNoFollow(target, expected, replacement);
       const receipt = await writeReceipt({
         action: 'filesystem_patch',
         riskTier: 1,
@@ -130,21 +183,17 @@ export function registerWorkspaceTools(server: McpServer): void {
       await Promise.all([assertPathNotLeased(from), assertPathNotLeased(to)]);
       let exists = false;
       try {
+        await fs.lstat(to);
         await revalidateAllowedPath(to, { mustExist: true, write: true });
         exists = true;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof Error && /No existing ancestor|ENOENT/.test(error.message))) throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
       const risk = exists ? 2 : 1;
       requireConfirmation(risk, confirm);
       if (exists && !replace) throw new Error('Destination exists; set replace=true after approval');
-      if (exists) await fs.rm(to, { recursive: true, force: true });
       await fs.mkdir(path.dirname(to), { recursive: true, mode: 0o700 });
-      await Promise.all([
-        revalidateAllowedPath(from, { mustExist: true, write: true }),
-        revalidateAllowedPath(to, { write: true })
-      ]);
-      await fs.rename(from, to);
+      await renameAnchored(from, to);
       const receipt = await writeReceipt({
         action: 'filesystem_move',
         riskTier: risk,

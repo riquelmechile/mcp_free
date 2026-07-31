@@ -11,7 +11,7 @@ import {
 } from './development.js';
 import { runCommand } from './command.js';
 import { withOrchestrationLock } from './orchestration-lock.js';
-import { canonicalJson, getReceipt, sha256, writeReceipt } from './receipts.js';
+import { canonicalJson, getReceipt, sha256, verifyReceiptChain, writeReceipt } from './receipts.js';
 
 export type LaneWorkerStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled';
 export type CoordinatorStatus = 'idle' | 'running' | 'ready_for_synthesis' | 'attention_required';
@@ -230,21 +230,42 @@ async function verifyTerminalEvidence(orchestrationId: string, lane: LaneWorkerR
   }
 }
 
+function workerPid(instanceId: string): number | null {
+  const match = /^worker_(\d+)_/.exec(instanceId);
+  if (!match) return null;
+  const pid = Number.parseInt(match[1]!, 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function processIsAlive(pid: number | null): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 async function reconcileInterruptedUnlocked(state: LaneCoordinatorState, orchestration: OrchestrationState): Promise<boolean> {
   let changed = false;
   for (const lane of state.lanes) {
     if (lane.status !== 'queued' && lane.status !== 'running') continue;
     const key = workerKey(state.orchestrationId, lane.laneId);
+    if (activeWorkers.has(key) || pendingContains(key)) continue;
+    const ownerPid = workerPid(lane.workerInstanceId);
     const ownedByThisProcess = lane.workerInstanceId === workerInstanceId;
-    if (!activeWorkers.has(key) && !pendingContains(key) && !ownedByThisProcess) {
-      await bindTerminalEvidence(
-        orchestration,
-        lane,
-        'interrupted',
-        'MCP service restarted or lost the local worker before completion; resume this lane explicitly.'
-      );
-      changed = true;
-    }
+    const otherLiveOwner = !ownedByThisProcess && processIsAlive(ownerPid);
+    if (otherLiveOwner) continue;
+    await bindTerminalEvidence(
+      orchestration,
+      lane,
+      'interrupted',
+      ownedByThisProcess
+        ? 'The local worker disappeared from the coordinator queue before completion; resume this lane explicitly.'
+        : 'MCP service restarted or lost the local worker before completion; resume this lane explicitly.'
+    );
+    changed = true;
   }
   if (changed) await saveCoordinator(state, orchestration.lanes.length);
   return changed;
@@ -518,6 +539,10 @@ export async function getCoordinatorState(orchestrationId: string): Promise<Lane
   return withOrchestrationLock(orchestrationId, async () => {
     const { orchestration, coordinator } = await loadOrCreateCoordinatorUnlocked(orchestrationId);
     await reconcileInterruptedUnlocked(coordinator, orchestration);
+    if (coordinator.lanes.some(lane => terminalStatuses.has(lane.status))) {
+      const chain = await verifyReceiptChain();
+      if (!chain.valid) throw new Error(`Receipt chain is invalid; lane evidence cannot be trusted: ${chain.errors.join('; ')}`);
+    }
     for (const lane of coordinator.lanes) await verifyTerminalEvidence(orchestrationId, lane);
     return structuredClone(coordinator);
   });
@@ -595,6 +620,7 @@ export async function materializeLaneInspection(orchestrationId: string, laneId:
       completedAt: worker.completedAt ?? coordinator.updatedAt,
       results: worker.results
     };
+    if (!worker.evidenceSha256) throw new Error(`Lane ${laneId} completed without an evidence hash`);
     lane.inspectionSha256 = worker.evidenceSha256;
     await writeJsonAtomic(orchestrationStatePath(orchestrationId), orchestration);
     return orchestration;

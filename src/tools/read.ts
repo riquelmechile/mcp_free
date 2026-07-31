@@ -130,7 +130,7 @@ export function registerReadTools(server: McpServer): void {
       if (mode === 'content' && await commandExists('rg')) {
         result = await runCommand(['rg', '--line-number', '--hidden', '--glob', '!.git', '--max-count', String(max_results), '--', query, target], { timeoutMs: 30_000, env: { RIPGREP_CONFIG_PATH: '/dev/null' } });
       } else if (mode === 'filename' && await commandExists('fd')) {
-        result = await runCommand(['fd', '--hidden', '--exclude', '.git', '--max-results', String(max_results), query, target], { timeoutMs: 30_000 });
+        result = await runCommand(['fd', '--hidden', '--exclude', '.git', '--max-results', String(max_results), '--', query, target], { timeoutMs: 30_000 });
       } else if (mode === 'filename') {
         result = await runCommand(['find', target, '-type', 'f', '-iname', `*${query}*`, '-print'], { timeoutMs: 30_000 });
       } else {

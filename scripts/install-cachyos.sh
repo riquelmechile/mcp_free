@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODE="workspace"
+MODE="observe"
 SETUP_DESKTOP=0
 while (($#)); do
   case "$1" in
     --full) MODE="full" ;;
+    --workspace) MODE="workspace" ;;
     --observe) MODE="observe" ;;
     --desktop-control) SETUP_DESKTOP=1 ;;
     -h|--help)
       cat <<'HELP'
-Usage: ./scripts/install-cachyos.sh [--observe|--full] [--desktop-control]
-  default             workspace mode (files/projects + ChatGPT-native development orchestration)
-  --observe           read-only inspection mode; recommended for first installation
-  --full              full filesystem, shell, processes, apps, clipboard and GUI tools
+Usage: ./scripts/install-cachyos.sh [--observe|--workspace|--full] [--desktop-control]
+  default             observe mode (fail-safe first installation)
+  --observe           read-only inspection mode
+  --workspace         bounded file tools + hardened ChatGPT-native development orchestration
+  --full              arbitrary shell/processes plus GUI tools; use only in an isolated account
   --desktop-control   install/configure KDE Wayland input automation through ydotool
 HELP
       exit 0
@@ -49,7 +51,7 @@ fi
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$UNIT_DIR"
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 
-npm --prefix "$ROOT_DIR" install
+npm --prefix "$ROOT_DIR" ci
 npm --prefix "$ROOT_DIR" run check
 npm --prefix "$ROOT_DIR" run build
 
@@ -75,7 +77,6 @@ ENV
 else
   sed -i "s/^MCP_MODE=.*/MCP_MODE=$MODE/" "$ENV_FILE"
   grep -q '^MCP_DEVELOPMENT_TIMEOUT_MS=' "$ENV_FILE" || printf '\nMCP_DEVELOPMENT_TIMEOUT_MS=1800000\n' >> "$ENV_FILE"
-  sed -i '/^GENTLE_AI_NO_SELF_UPDATE=/d' "$ENV_FILE"
 fi
 
 SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
@@ -94,14 +95,21 @@ Environment=PATH=$SERVICE_PATH
 ExecStart=$(command -v node) $ROOT_DIR/dist/server.js
 Restart=on-failure
 RestartSec=3
-TimeoutStopSec=10
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-LockPersonality=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
 RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=default.target

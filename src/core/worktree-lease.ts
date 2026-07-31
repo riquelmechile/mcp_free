@@ -18,21 +18,45 @@ function within(candidate: string, root: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+async function physicalCandidate(candidate: string): Promise<string> {
+  const absolute = path.resolve(candidate);
+  let ancestor = absolute;
+  while (true) {
+    try {
+      const physicalAncestor = await fs.realpath(ancestor);
+      const suffix = path.relative(ancestor, absolute);
+      return path.resolve(physicalAncestor, suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return absolute;
+      ancestor = parent;
+    }
+  }
+}
+
 function leasePath(root: string): string {
   const key = crypto.createHash('sha256').update(root).digest('hex');
   return path.join(leaseRoot, `${key}.json`);
 }
 
+async function syncDirectory(directoryPath: string): Promise<void> {
+  const directory = await fs.open(directoryPath, 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
 async function writeAtomic(target: string, value: WorktreeLease): Promise<void> {
   await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-    flag: 'wx'
-  });
+  const handle = await fs.open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   await fs.rename(temporary, target);
-  await fs.chmod(target, 0o600);
+  await syncDirectory(path.dirname(target));
 }
 
 async function readLeaseFile(target: string): Promise<WorktreeLease> {
@@ -66,7 +90,14 @@ export async function acquireWorktreeLease(root: string, orchestrationId: string
     updatedAt: now
   };
   try {
-    await fs.writeFile(target, `${JSON.stringify(lease, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    const handle = await fs.open(target, 'wx', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(lease, null, 2)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await syncDirectory(leaseRoot);
     return { lease, acquired: true };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
@@ -99,15 +130,16 @@ export async function releaseWorktreeLease(root: string, orchestrationId: string
       throw new Error(`Refusing to release worktree lease owned by ${lease.orchestrationId}`);
     }
     await fs.rm(target, { force: true });
+    await syncDirectory(leaseRoot);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
 
 export async function assertPathNotLeased(candidate: string): Promise<void> {
-  const absolute = path.resolve(candidate);
+  const physical = await physicalCandidate(candidate);
   for (const lease of await listWorktreeLeases()) {
-    if (within(absolute, lease.root)) {
+    if (within(physical, lease.root)) {
       throw new Error(`Path is protected by active development orchestration ${lease.orchestrationId}: ${lease.root}`);
     }
   }
