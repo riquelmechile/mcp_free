@@ -218,6 +218,7 @@ export async function writeAnchoredTextAtomic(
     );
     temporaryExists = true;
     try {
+      await temporary.chmod(existingMode);
       await writeAll(temporary, content);
     } finally {
       await temporary.close();
