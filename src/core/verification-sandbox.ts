@@ -42,7 +42,7 @@ export function buildSandboxArgv(
     '--unshare-uts',
     '--unshare-ipc'
   ];
-  if (options.network !== true && !config.sandboxCiSharedNetwork) argv.push('--unshare-net');
+  if (options.network !== true) argv.push('--unshare-net');
   argv.push(
     '--clearenv',
     '--cap-drop', 'ALL',
