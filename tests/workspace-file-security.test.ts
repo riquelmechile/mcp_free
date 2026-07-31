@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-test('no-follow workspace primitives refuse parent symlink escapes before changing outside bytes', async () => {
+test('descriptor-anchored workspace primitives reject symlink and hardlink escapes before changing outside bytes', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-free-workspace-root-'));
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-free-workspace-outside-'));
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-free-workspace-state-'));
@@ -27,6 +27,14 @@ test('no-follow workspace primitives refuse parent symlink escapes before changi
     await assert.rejects(
       workspace.patchFileNoFollow(path.join(root, 'escape', 'victim.txt'), 'outside', 'forged'),
       /outside MCP_ALLOWED_ROOTS|Symbolic-link|validated path/i
+    );
+    assert.equal(await fs.readFile(victim, 'utf8'), 'outside-original\n');
+
+    const hardlink = path.join(root, 'hardlink.txt');
+    await fs.link(victim, hardlink);
+    await assert.rejects(
+      workspace.writeFileNoFollow(hardlink, 'forged\n', true),
+      /multiple hard links/i
     );
     assert.equal(await fs.readFile(victim, 'utf8'), 'outside-original\n');
 
