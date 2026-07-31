@@ -1,4 +1,3 @@
-import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -6,7 +5,12 @@ import { z } from 'zod';
 import { classifyFileAction, requireConfirmation } from '../core/policy.js';
 import { resolveAllowedPath } from '../core/paths.js';
 import { verifyReceiptChain, writeReceipt } from '../core/receipts.js';
-import { ensureAnchoredDirectory, openAnchoredFile, renameAnchoredPath } from '../core/safe-fs.js';
+import {
+  ensureAnchoredDirectory,
+  readAnchoredTextFile,
+  renameAnchoredPath,
+  writeAnchoredTextAtomic
+} from '../core/safe-fs.js';
 import { assertPathNotLeased } from '../core/worktree-lease.js';
 import { errorResult, textResult } from './helpers.js';
 
@@ -16,43 +20,20 @@ async function assertHealthyReceiptChain(): Promise<void> {
 }
 
 export async function writeFileNoFollow(target: string, content: string, overwrite: boolean): Promise<void> {
-  const flags = constants.O_WRONLY | constants.O_CREAT | (overwrite ? 0 : constants.O_EXCL);
-  const opened = await openAnchoredFile(target, flags, { mode: 0o600, createParents: true, write: true });
-  try {
-    if (overwrite) await opened.file.truncate(0);
-    const buffer = Buffer.from(content, 'utf8');
-    let offset = 0;
-    while (offset < buffer.length) {
-      const { bytesWritten } = await opened.file.write(buffer, offset, buffer.length - offset, offset);
-      if (bytesWritten <= 0) throw new Error(`Failed to write bytes to ${target}`);
-      offset += bytesWritten;
-    }
-    await opened.file.sync();
-  } finally {
-    await Promise.all([opened.file.close(), opened.parent.close()]);
-  }
+  await writeAnchoredTextAtomic(target, content, { overwrite, createParents: true });
 }
 
 export async function patchFileNoFollow(target: string, expected: string, replacement: string): Promise<{ original: string; updated: string }> {
-  const opened = await openAnchoredFile(target, constants.O_RDWR, { write: true });
-  try {
-    const original = await opened.file.readFile('utf8');
-    const matches = original.split(expected).length - 1;
-    if (matches !== 1) throw new Error(`Expected text must occur exactly once; found ${matches} matches`);
-    const updated = original.replace(expected, replacement);
-    await opened.file.truncate(0);
-    const buffer = Buffer.from(updated, 'utf8');
-    let offset = 0;
-    while (offset < buffer.length) {
-      const { bytesWritten } = await opened.file.write(buffer, offset, buffer.length - offset, offset);
-      if (bytesWritten <= 0) throw new Error(`Failed to write patched bytes to ${target}`);
-      offset += bytesWritten;
-    }
-    await opened.file.sync();
-    return { original, updated };
-  } finally {
-    await Promise.all([opened.file.close(), opened.parent.close()]);
-  }
+  const { content: original, identity } = await readAnchoredTextFile(target, true);
+  const matches = original.split(expected).length - 1;
+  if (matches !== 1) throw new Error(`Expected text must occur exactly once; found ${matches} matches`);
+  const updated = original.replace(expected, replacement);
+  await writeAnchoredTextAtomic(target, updated, {
+    overwrite: true,
+    expectedIdentity: identity,
+    mode: identity.mode & 0o777
+  });
+  return { original, updated };
 }
 
 export async function renameAnchored(from: string, to: string): Promise<void> {
@@ -62,7 +43,7 @@ export async function renameAnchored(from: string, to: string): Promise<void> {
 export function registerWorkspaceTools(server: McpServer): void {
   server.registerTool('filesystem_write', {
     title: 'Write file',
-    description: 'Create or replace one UTF-8 file through descriptor-anchored, no-follow operations inside a physical allowed root.',
+    description: 'Create or atomically replace one UTF-8 file through descriptor-anchored, no-follow operations inside a physical allowed root.',
     inputSchema: {
       path: z.string(),
       content: z.string(),
@@ -81,7 +62,13 @@ export function registerWorkspaceTools(server: McpServer): void {
       const receipt = await writeReceipt({
         action: 'filesystem_write', riskTier: risk, success: true, durationMs: Date.now() - started,
         requestId: request_id, target, output: content,
-        details: { bytesWritten: Buffer.byteLength(content), overwrite, descriptorAnchored: true, noFollow: true }
+        details: {
+          bytesWritten: Buffer.byteLength(content),
+          overwrite,
+          descriptorAnchored: true,
+          noFollow: true,
+          atomicReplacement: true
+        }
       });
       return textResult(`Wrote ${Buffer.byteLength(content)} bytes to ${target}. Receipt: ${receipt.id}.`, { path: target, bytesWritten: Buffer.byteLength(content), receipt });
     } catch (error) { return errorResult(error); }
@@ -107,7 +94,7 @@ export function registerWorkspaceTools(server: McpServer): void {
 
   server.registerTool('filesystem_patch', {
     title: 'Patch file',
-    description: 'Replace one exact occurrence in a regular UTF-8 file opened relative to a verified parent descriptor.',
+    description: 'Replace one exact occurrence using a compare-and-replace temporary file and atomic rename inside a verified parent directory.',
     inputSchema: {
       path: z.string(), expected: z.string().min(1), replacement: z.string(),
       request_id: z.string().min(8).max(128).optional()
@@ -123,7 +110,14 @@ export function registerWorkspaceTools(server: McpServer): void {
       const receipt = await writeReceipt({
         action: 'filesystem_patch', riskTier: 1, success: true, durationMs: Date.now() - started,
         requestId: request_id, target, output: updated,
-        details: { beforeBytes: Buffer.byteLength(original), afterBytes: Buffer.byteLength(updated), descriptorAnchored: true, noFollow: true }
+        details: {
+          beforeBytes: Buffer.byteLength(original),
+          afterBytes: Buffer.byteLength(updated),
+          descriptorAnchored: true,
+          noFollow: true,
+          atomicReplacement: true,
+          identityChecked: true
+        }
       });
       return textResult(`Patched ${target}. Receipt: ${receipt.id}.`, { path: target, receipt });
     } catch (error) { return errorResult(error); }
