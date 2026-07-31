@@ -1,4 +1,4 @@
-import { readlinkSync } from 'node:fs';
+import { lstatSync, readlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
@@ -18,6 +18,46 @@ export interface SandboxCommandOptions {
 
 function hostLinkTarget(link: string, fallback: string): string {
   try { return readlinkSync(link); } catch { return fallback; }
+}
+
+function gitMetadataKind(root: string): 'directory' | 'file' | 'missing' {
+  try {
+    const metadata = lstatSync(path.join(root, '.git'));
+    if (metadata.isDirectory()) return 'directory';
+    if (metadata.isFile()) return 'file';
+    return 'missing';
+  } catch {
+    return 'missing';
+  }
+}
+
+function referencesGitMetadata(argument: string): boolean {
+  const normalized = argument.replaceAll('\\', '/');
+  return normalized === '.git'
+    || normalized.startsWith('.git/')
+    || normalized.endsWith('/.git')
+    || normalized.includes('/.git/');
+}
+
+function insertBeforeDelimiter(command: string[], additions: string[]): string[] {
+  const delimiter = command.indexOf('--', 1);
+  if (delimiter < 0) return [...command, ...additions];
+  return [...command.slice(0, delimiter), ...additions, ...command.slice(delimiter)];
+}
+
+export function hardenInspectionCommand(command: string[]): string[] {
+  if (command.length === 0) throw new Error('Inspection command must not be empty');
+  const executable = path.basename(command[0]!);
+  if (executable === 'git') return command;
+  if (command.slice(1).some(referencesGitMetadata)) {
+    throw new Error('Non-Git inspection commands may not access .git metadata');
+  }
+  if (executable === 'ls' && command.slice(1).some(argument => argument === '--recursive' || /^-[^-]*R/.test(argument))) {
+    throw new Error('Recursive ls is blocked because it can traverse hidden Git metadata');
+  }
+  if (executable === 'rg') return insertBeforeDelimiter(command, ['--glob', '!.git/**']);
+  if (executable === 'fd' || executable === 'fdfind') return insertBeforeDelimiter(command, ['--exclude', '.git']);
+  return command;
 }
 
 const HOST_ENVIRONMENT: Record<string, string> = {
@@ -54,8 +94,23 @@ export function buildSandboxArgv(
     '--dev', '/dev',
     '--tmpfs', '/tmp',
     '--dir', '/tmp/home',
-    options.writable ? '--bind' : '--ro-bind', root, '/workspace',
-    '--ro-bind', path.join(root, '.git'), '/workspace/.git',
+    options.writable ? '--bind' : '--ro-bind', root, '/workspace'
+  );
+  const metadataKind = gitMetadataKind(root);
+  if (metadataKind !== 'missing') {
+    argv.push('--ro-bind', path.join(root, '.git'), '/workspace/.git');
+    if (metadataKind === 'directory') {
+      const gitConfig = path.join(root, '.git', 'config');
+      try {
+        if (lstatSync(gitConfig).isFile()) argv.push('--ro-bind', '/dev/null', '/workspace/.git/config');
+      } catch { /* Repositories without a local config are valid. */ }
+      const worktreeConfig = path.join(root, '.git', 'config.worktree');
+      try {
+        if (lstatSync(worktreeConfig).isFile()) argv.push('--ro-bind', '/dev/null', '/workspace/.git/config.worktree');
+      } catch { /* Optional extension config. */ }
+    }
+  }
+  argv.push(
     '--chdir', '/workspace',
     '--setenv', 'PATH', '/usr/bin:/bin',
     '--setenv', 'HOME', '/tmp/home',
@@ -87,6 +142,9 @@ async function runSandboxed(
   options: SandboxCommandOptions
 ): Promise<CommandResult> {
   const realRoot = await fs.realpath(root);
+  if (path.basename(command[0] ?? '') === 'git' && gitMetadataKind(realRoot) !== 'directory') {
+    throw new Error('Development sandbox currently requires a standard Git worktree with a .git directory; linked worktrees are rejected.');
+  }
   if (config.sandboxCiBypass) {
     return runCommand(command, {
       cwd: realRoot,
@@ -138,7 +196,7 @@ export function runInspectionCommand(
   command: string[],
   options: Omit<SandboxCommandOptions, 'writable' | 'network'>
 ): Promise<CommandResult> {
-  return runSandboxed(root, command, { ...options, writable: false, network: false });
+  return runSandboxed(root, hardenInspectionCommand(command), { ...options, writable: false, network: false });
 }
 
 export function runVerificationCommand(
