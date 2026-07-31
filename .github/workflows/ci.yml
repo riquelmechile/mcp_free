@@ -43,13 +43,15 @@ jobs:
             python3 scripts/migrate-sandbox-all-git.py
           fi
           python3 scripts/fix-sandbox-migration-types.py
+      - name: Refresh lockfile
+        run: npm install --package-lock-only --ignore-scripts
       - name: Validate scripts and manifests
         run: |
           bash -n scripts/*.sh
           node -e "for (const file of ['package.json','package-lock.json','tsconfig.json','.codex-plugin/plugin.json']) JSON.parse(require('fs').readFileSync(file, 'utf8'))"
       - run: npm ci
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit all dependencies
+        run: npm audit --audit-level=moderate
       - name: Check
         run: npm run check | tee ci-log.txt
       - name: Upload diagnostic log
