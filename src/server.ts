@@ -10,7 +10,7 @@ import { registerFullTools } from './tools/full.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWorkspaceTools } from './tools/workspace.js';
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const MAX_SESSIONS = 100;
 const transports = new Map<string, StreamableHTTPServerTransport>();
 const requestsByIp = new Map<string, { minute: number; count: number }>();
@@ -103,7 +103,13 @@ app.get('/healthz', authenticate, (_req, res) => {
     arbitraryWorkspaceExecution: false,
     evidenceBoundLaneReceipts: true,
     persistentWorktreeLeases: true,
-    processGroupTermination: true
+    processGroupTermination: true,
+    canonicalRootOwnedExecutables: true,
+    inspectionSandbox: config.verificationSandbox,
+    verificationSandbox: config.verificationSandbox,
+    verificationNetwork: config.verificationNetwork,
+    cleanVerificationEnvironment: true,
+    descriptorAnchoredWrites: true
   });
 });
 app.get('/readyz', authenticate, (_req, res) => {

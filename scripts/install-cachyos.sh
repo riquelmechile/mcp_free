@@ -39,7 +39,7 @@ fi
 chmod +x "$ROOT_DIR"/scripts/*.sh
 
 sudo pacman -S --needed --noconfirm \
-  nodejs npm git ripgrep fd jq curl wl-clipboard spectacle xdg-utils trash-cli ydotool
+  nodejs npm git ripgrep fd jq bubblewrap curl wl-clipboard spectacle xdg-utils trash-cli ydotool
 
 if ! command -v kdotool >/dev/null 2>&1; then
   if command -v paru >/dev/null 2>&1; then paru -S --needed --noconfirm kdotool || true
@@ -68,6 +68,8 @@ MCP_MAX_READ_BYTES=1048576
 MCP_MAX_OUTPUT_BYTES=262144
 MCP_COMMAND_TIMEOUT_MS=120000
 MCP_DEVELOPMENT_TIMEOUT_MS=1800000
+MCP_VERIFICATION_SANDBOX=1
+MCP_VERIFICATION_NETWORK=0
 MCP_RATE_LIMIT_PER_MINUTE=120
 MCP_STATE_DIR=$STATE_DIR
 MCP_LOG_LEVEL=info
@@ -77,6 +79,8 @@ ENV
 else
   sed -i "s/^MCP_MODE=.*/MCP_MODE=$MODE/" "$ENV_FILE"
   grep -q '^MCP_DEVELOPMENT_TIMEOUT_MS=' "$ENV_FILE" || printf '\nMCP_DEVELOPMENT_TIMEOUT_MS=1800000\n' >> "$ENV_FILE"
+  grep -q '^MCP_VERIFICATION_SANDBOX=' "$ENV_FILE" || printf 'MCP_VERIFICATION_SANDBOX=1\n' >> "$ENV_FILE"
+  grep -q '^MCP_VERIFICATION_NETWORK=' "$ENV_FILE" || printf 'MCP_VERIFICATION_NETWORK=0\n' >> "$ENV_FILE"
 fi
 
 SERVICE_PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"

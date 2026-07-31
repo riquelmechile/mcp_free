@@ -8,6 +8,43 @@ const auditPath = path.join(config.stateDir, 'audit.jsonl');
 const receiptDir = path.join(config.stateDir, 'receipts');
 const chainHeadPath = path.join(config.stateDir, 'chain-head.json');
 let receiptWriteQueue: Promise<void> = Promise.resolve();
+const receiptLockPath = path.join(config.stateDir, 'receipt-chain.lock');
+const receiptLockToken = `${process.pid}-${crypto.randomBytes(12).toString('hex')}`;
+
+async function processIsAlive(pid: number): Promise<boolean> {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+async function withReceiptFilesystemLock<T>(operation: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 60_000;
+  while (true) {
+    try {
+      await fs.mkdir(receiptLockPath, { mode: 0o700 });
+      await fs.writeFile(path.join(receiptLockPath, 'owner.json'), JSON.stringify({ pid: process.pid, token: receiptLockToken }), { mode: 0o600, flag: 'wx' });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      let stale = false;
+      try {
+        const owner = JSON.parse(await fs.readFile(path.join(receiptLockPath, 'owner.json'), 'utf8')) as { pid?: number };
+        stale = !(await processIsAlive(owner.pid ?? -1));
+      } catch {
+        const metadata = await fs.stat(receiptLockPath);
+        stale = Date.now() - metadata.mtimeMs > 60_000;
+      }
+      if (stale) { await fs.rm(receiptLockPath, { recursive: true, force: true }); continue; }
+      if (Date.now() >= deadline) throw new Error('Timed out waiting for receipt-chain lock');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  try { return await operation(); } finally {
+    try {
+      const owner = JSON.parse(await fs.readFile(path.join(receiptLockPath, 'owner.json'), 'utf8')) as { token?: string };
+      if (owner.token !== receiptLockToken) throw new Error('Refusing to release another process receipt lock');
+      await fs.rm(receiptLockPath, { recursive: true, force: true });
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+}
 
 async function ensureState(): Promise<void> {
   await fs.mkdir(config.stateDir, { recursive: true, mode: 0o700 });
@@ -172,7 +209,7 @@ async function verifyReceiptChainUnlocked(): Promise<ReceiptChainVerification> {
 
 export async function verifyReceiptChain(): Promise<ReceiptChainVerification> {
   await receiptWriteQueue;
-  return verifyReceiptChainUnlocked();
+  return withReceiptFilesystemLock(() => verifyReceiptChainUnlocked());
 }
 
 async function writeChainHead(receipt: ActionReceipt): Promise<void> {
@@ -184,9 +221,12 @@ async function writeChainHead(receipt: ActionReceipt): Promise<void> {
     receiptHash: receipt.receiptHash,
     updatedAt: receipt.timestamp
   }, null, 2)}\n`;
-  await fs.writeFile(temporary, content, { mode: 0o600, flag: 'wx' });
+  const handle = await fs.open(temporary, 'wx', 0o600);
+  try { await handle.writeFile(content, 'utf8'); await handle.sync(); } finally { await handle.close(); }
   await fs.rename(temporary, chainHeadPath);
   await fs.chmod(chainHeadPath, 0o600);
+  const directory = await fs.open(path.dirname(chainHeadPath), 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 
 async function writeReceiptUnlocked(input: {
@@ -233,7 +273,8 @@ async function writeReceiptUnlocked(input: {
   const receiptPath = path.join(receiptDir, `${receipt.id}.json`);
 
   // O_EXCL prevents accidental overwrite. The audit log is append-only at the application layer.
-  await fs.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  const receiptFile = await fs.open(receiptPath, 'wx', 0o600);
+  try { await receiptFile.writeFile(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8'); await receiptFile.sync(); } finally { await receiptFile.close(); }
   const audit = await fs.open(auditPath, 'a', 0o600);
   try {
     await audit.write(serialized);
@@ -257,7 +298,7 @@ export function writeReceipt(input: {
   output?: string | undefined;
   details?: Record<string, unknown> | undefined;
 }): Promise<ActionReceipt> {
-  const operation = receiptWriteQueue.then(() => writeReceiptUnlocked(input));
+  const operation = receiptWriteQueue.then(() => withReceiptFilesystemLock(() => writeReceiptUnlocked(input)));
   receiptWriteQueue = operation.then(() => undefined, () => undefined);
   return operation;
 }

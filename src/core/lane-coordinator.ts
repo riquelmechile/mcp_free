@@ -5,12 +5,12 @@ import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
 import {
   loadOrchestration,
-  validateInspectionCommand,
   type LaneInspectionRequest,
   type OrchestrationState
 } from './development.js';
-import { runCommand } from './command.js';
+import { canonicalizeInspectionCommand } from './command-policy.js';
 import { withOrchestrationLock } from './orchestration-lock.js';
+import { runInspectionCommand } from './verification-sandbox.js';
 import { canonicalJson, getReceipt, sha256, verifyReceiptChain, writeReceipt } from './receipts.js';
 
 export type LaneWorkerStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled';
@@ -293,33 +293,6 @@ async function loadOrCreateCoordinatorUnlocked(id: string): Promise<{ orchestrat
   return { orchestration, coordinator };
 }
 
-async function assertExistingArgumentsStayInProject(root: string, argv: string[]): Promise<void> {
-  const realRoot = await fs.realpath(root);
-  for (const argument of argv.slice(1)) {
-    if (argument === '-' || argument.startsWith('-')) continue;
-    const candidate = path.resolve(realRoot, argument);
-    if (!within(candidate, realRoot)) throw new Error(`Argument resolves outside project: ${argument}`);
-    let metadata;
-    try {
-      metadata = await fs.lstat(candidate);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
-    if (metadata.isSymbolicLink()) throw new Error(`Explicit symlink arguments are blocked during inspection: ${argument}`);
-    const resolved = await fs.realpath(candidate);
-    if (!within(resolved, realRoot)) throw new Error(`Argument resolves outside project through filesystem links: ${argument}`);
-  }
-}
-
-const inspectionEnvironment: Record<string, string> = {
-  GIT_PAGER: 'cat',
-  PAGER: 'cat',
-  GIT_OPTIONAL_LOCKS: '0',
-  RIPGREP_CONFIG_PATH: '/dev/null',
-  NO_COLOR: '1',
-  LANG: 'C'
-};
 
 async function updateLane(orchestrationId: string, laneId: string, updater: (lane: LaneWorkerRecord) => void): Promise<void> {
   await withOrchestrationLock(orchestrationId, async () => {
@@ -368,11 +341,9 @@ async function executeLane(orchestrationId: string, laneId: string, controller: 
         await finishLane(orchestrationId, laneId, 'cancelled', 'Lane cancelled before the next inspection command started.');
         return;
       }
-      const result = await runCommand(record.commands[index]!, {
-        cwd: root,
+      const result = await runInspectionCommand(root, record.commands[index]!, {
         timeoutMs: record.timeoutMs,
         maxTimeoutMs: config.developmentTimeoutMs,
-        env: inspectionEnvironment,
         signal: controller.signal
       });
       await updateLane(orchestrationId, laneId, lane => {
@@ -439,16 +410,16 @@ export async function enqueueParallelInspection(
     for (const request of requests) {
       if (!loaded.orchestration.lanes.some(lane => lane.id === request.laneId)) throw new Error(`Unknown lane_id: ${request.laneId}`);
       if (request.commands.length < 1 || request.commands.length > 8) throw new Error('Each lane requires between 1 and 8 inspection commands');
+      const canonicalCommands: string[][] = [];
       for (const argv of request.commands) {
-        validateInspectionCommand(argv);
-        await assertExistingArgumentsStayInProject(loaded.orchestration.root, argv);
+        canonicalCommands.push(await canonicalizeInspectionCommand(argv, loaded.orchestration.root));
       }
       const previous = loaded.coordinator.lanes.find(lane => lane.laneId === request.laneId);
       if (previous?.status === 'queued' || previous?.status === 'running') throw new Error(`Lane ${request.laneId} is already ${previous.status}`);
       if (previous?.status === 'completed') throw new Error(`Lane ${request.laneId} already completed; create a new orchestration to inspect it again`);
       const replacement: LaneWorkerRecord = {
         laneId: request.laneId,
-        commands: request.commands,
+        commands: canonicalCommands,
         timeoutMs,
         status: 'queued',
         attempt: (previous?.attempt ?? 0) + 1,

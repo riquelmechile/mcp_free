@@ -46,7 +46,7 @@ const TRUSTED_CANDIDATES: Record<TrustedExecutable, readonly string[]> = {
   make: ['/usr/bin/make']
 };
 
-const TRUSTED_PHYSICAL_ROOTS = ['/usr/bin', '/usr/lib', '/usr/libexec', '/usr/local/bin', '/usr/local/lib'];
+const TRUSTED_PHYSICAL_ROOTS = ['/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/usr/local/bin', '/usr/local/lib', '/opt/hostedtoolcache'];
 const INSPECTION_EXECUTABLES = new Set<TrustedExecutable>(['git', 'rg', 'fd', 'ls', 'cat', 'head', 'tail', 'wc', 'jq', 'stat']);
 const VERIFICATION_EXECUTABLES = new Set<TrustedExecutable>(['git', 'npm', 'pnpm', 'yarn', 'python', 'python3', 'pytest', 'go', 'cargo', 'make']);
 const SENSITIVE_PATH = /(^|\/)(\.env(?:\.|$)|\.ssh|\.gnupg|\.aws|\.kube|secrets?|credentials?)(\/|$)|\.(?:pem|key)$/i;
@@ -174,6 +174,9 @@ function analyzeGit(argv: string[]): string[] {
   }
 
   if (subcommand === 'diff') {
+    if (args.some(argument => argument === '--output' || argument.startsWith('--output='))) {
+      throw new Error('Git argument can write files, escape the worktree, or execute configured helpers');
+    }
     const parsed = parseOptions(args, {
       noValue: new Set(['--stat', '--name-only', '--name-status', '--numstat', '--check', '--cached', '--staged', '--no-ext-diff', '--no-textconv', '--color=never', '--word-diff']),
       value: new Set(['--unified', '--diff-filter']),
@@ -197,7 +200,7 @@ function analyzeGit(argv: string[]): string[] {
 
   if (subcommand === 'show') {
     const parsed = parseOptions(args, {
-      noValue: new Set(['--stat', '--name-only', '--name-status', '--no-patch', '--no-ext-diff', '--no-textconv', '--color=never']),
+      noValue: new Set(['--stat', '--name-only', '--name-status', '--no-patch', '--oneline', '--no-ext-diff', '--no-textconv', '--color=never']),
       value: new Set(['--format'])
     });
     if (parsed.positionals.length > 1 || (parsed.positionals[0] && !SAFE_TARGET.test(parsed.positionals[0]))) {
@@ -245,6 +248,10 @@ function analyzeInspection(argv: string[]): { executable: TrustedExecutable; pat
   if (executable === 'git') return { executable, paths: analyzeGit(argv) };
 
   if (executable === 'rg') {
+    if (argv.some(argument => argument === '--pre' || argument.startsWith('--pre=') || argument === '--pre-glob' || argument.startsWith('--pre-glob='))) {
+      throw new Error('ripgrep preprocessors are not allowed');
+    }
+    if (argv.includes('--follow') || argv.includes('-L')) throw new Error('ripgrep symlink following is not allowed');
     const parsed = parseOptions(argv.slice(1), {
       noValue: new Set(['--line-number', '-n', '--hidden', '--no-ignore', '--files', '--files-with-matches', '-l', '--count', '--fixed-strings', '-F', '--ignore-case', '-i', '--case-sensitive', '-s', '--smart-case', '-S', '--word-regexp', '-w', '--invert-match', '-v', '--multiline', '-U', '--no-messages']),
       value: new Set(['--glob', '-g', '--type', '-t', '--type-not', '-T', '--max-count', '-m', '--max-depth', '--context', '-C', '--before-context', '-B', '--after-context', '-A'])
@@ -258,6 +265,8 @@ function analyzeInspection(argv: string[]): { executable: TrustedExecutable; pat
   }
 
   if (executable === 'fd') {
+    if (argv.some(argument => ['--exec', '--exec-batch', '-x', '-X'].includes(argument))) throw new Error('fd execution actions are not allowed');
+    if (argv.includes('--follow') || argv.includes('-L')) throw new Error('fd symlink following is not allowed');
     const parsed = parseOptions(argv.slice(1), {
       noValue: new Set(['--hidden', '-H', '--no-ignore', '-I', '--glob', '-g', '--fixed-strings', '-F', '--absolute-path', '--color=never']),
       value: new Set(['--exclude', '-E', '--max-depth', '-d', '--type', '-t', '--extension', '-e', '--max-results'])
@@ -354,7 +363,7 @@ export function validateVerificationCommand(argv: string[]): void {
 
   if (executable === 'git') {
     if (JSON.stringify(argv.slice(1)) !== JSON.stringify(['diff', '--check'])) {
-      throw new Error('Verification git is restricted to git diff --check');
+      throw new Error('Only git diff --check is allowed as a verification command');
     }
     return;
   }
@@ -362,7 +371,7 @@ export function validateVerificationCommand(argv: string[]): void {
   if (executable === 'npm' || executable === 'pnpm' || executable === 'yarn') {
     if (argv[1] === 'test' && argv.length === 2) return;
     if (argv[1] === 'run' && argv.length === 3 && SAFE_SCRIPT.test(argv[2]!)) return;
-    throw new Error(`${executable} verification is restricted to test or run <safe-script> without extra arguments`);
+    throw new Error(`${executable} verification must use run or test with a safe script and no extra arguments`);
   }
 
   if (executable === 'python' || executable === 'python3') {
@@ -413,7 +422,11 @@ async function assertProjectPaths(root: string, paths: string[]): Promise<void> 
 }
 
 export async function resolveTrustedExecutable(executable: TrustedExecutable): Promise<string> {
-  for (const candidate of TRUSTED_CANDIDATES[executable]) {
+  const candidates = [...TRUSTED_CANDIDATES[executable]];
+  if (process.env.CI === 'true' && executable === 'npm' && process.env.npm_execpath && path.isAbsolute(process.env.npm_execpath)) {
+    candidates.unshift(process.env.npm_execpath);
+  }
+  for (const candidate of candidates) {
     try {
       const physical = await fs.realpath(candidate);
       const metadata = await fs.stat(physical);

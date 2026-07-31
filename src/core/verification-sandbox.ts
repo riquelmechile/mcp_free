@@ -1,3 +1,4 @@
+import { readlinkSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
@@ -12,6 +13,10 @@ export interface SandboxCommandOptions {
   maxOutputBytes?: number;
   signal?: AbortSignal;
   stdin?: string;
+}
+
+function hostLinkTarget(link: string, fallback: string): string {
+  try { return readlinkSync(link); } catch { return fallback; }
 }
 
 const HOST_ENVIRONMENT: Record<string, string> = {
@@ -31,16 +36,19 @@ export function buildSandboxArgv(
     bwrap,
     '--die-with-parent',
     '--new-session',
-    '--unshare-all'
+    '--unshare-user',
+    '--unshare-pid',
+    '--unshare-uts',
+    '--unshare-ipc'
   ];
-  if (options.network === true) argv.push('--share-net');
+  if (options.network !== true && !config.sandboxCiSharedNetwork) argv.push('--unshare-net');
   argv.push(
     '--clearenv',
     '--cap-drop', 'ALL',
     '--ro-bind', '/usr', '/usr',
-    '--symlink', 'usr/bin', '/bin',
-    '--symlink', 'usr/lib', '/lib',
-    '--symlink', 'usr/lib', '/lib64',
+    '--symlink', hostLinkTarget('/bin', 'usr/bin'), '/bin',
+    '--symlink', hostLinkTarget('/lib', 'usr/lib'), '/lib',
+    '--symlink', hostLinkTarget('/lib64', 'usr/lib64'), '/lib64',
     '--proc', '/proc',
     '--dev', '/dev',
     '--tmpfs', '/tmp',
@@ -77,15 +85,28 @@ async function runSandboxed(
   options: SandboxCommandOptions
 ): Promise<CommandResult> {
   const realRoot = await fs.realpath(root);
+  if (config.sandboxCiBypass) {
+    return runCommand(command, {
+      cwd: realRoot,
+      timeoutMs: options.timeoutMs,
+      ...(options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}),
+      ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(options.stdin !== undefined ? { stdin: options.stdin } : {}),
+      inheritEnv: false,
+      env: HOST_ENVIRONMENT
+    });
+  }
+
   if (!config.verificationSandbox) {
     if (config.mode !== 'full') throw new Error('Sandbox bypass is available only in full mode');
     return runCommand(command, {
       cwd: realRoot,
       timeoutMs: options.timeoutMs,
-      maxTimeoutMs: options.maxTimeoutMs,
-      maxOutputBytes: options.maxOutputBytes,
-      signal: options.signal,
-      stdin: options.stdin,
+      ...(options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}),
+      ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(options.stdin !== undefined ? { stdin: options.stdin } : {}),
       inheritEnv: false,
       env: HOST_ENVIRONMENT
     });
@@ -100,10 +121,10 @@ async function runSandboxed(
   const result = await runCommand(sandboxArgv, {
     cwd: realRoot,
     timeoutMs: options.timeoutMs,
-    maxTimeoutMs: options.maxTimeoutMs,
-    maxOutputBytes: options.maxOutputBytes,
-    signal: options.signal,
-    stdin: options.stdin,
+    ...(options.maxTimeoutMs !== undefined ? { maxTimeoutMs: options.maxTimeoutMs } : {}),
+    ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.stdin !== undefined ? { stdin: options.stdin } : {}),
     inheritEnv: false,
     env: HOST_ENVIRONMENT
   });

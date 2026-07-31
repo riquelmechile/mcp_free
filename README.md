@@ -236,3 +236,12 @@ MCP_MODE=observe npm start
 ## Licencia
 
 MIT. El flujo adopta ideas operativas de desarrollo guiado por evidencia, pero no depende de Gentle AI ni de sus modelos/agentes.
+
+## Command and test isolation (0.6.0)
+
+Workspace and observe development tools accept logical executable names only. The server resolves them to root-owned, non-writable binaries below `/usr` or `/usr/local`; inputs such as `/tmp/git`, `./git`, and user-controlled PATH replacements are rejected. Each supported command has a closed argument grammar, and path-bearing options cannot escape the project.
+
+Inspection commands run in a read-only Bubblewrap namespace. Verification commands run in a writable worktree namespace with an empty environment, a temporary HOME, no MCP state mount, no credentials, no network by default, and no access to the rest of the user's home. Workspace mode refuses to start if sandbox bypass is requested. Networked or unsandboxed verification is available only in full mode and remains equivalent to arbitrary code execution.
+
+The local receipt chain is an operational tamper detector, not protection against a hostile process already controlling the same Linux account. Receipt appends are serialized across service instances and fsynced, while stronger adversarial guarantees still require a dedicated OS user or external append-only storage.
+

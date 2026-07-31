@@ -22,7 +22,7 @@ test('inspection executables must be logical names, never attacker-controlled pa
 });
 
 test('inspection grammar rejects execution, output, config, and external-path options', () => {
-  assert.throws(() => validateInspectionCommand(['git', 'diff', '--output=out.patch']), /not allowed/);
+  assert.throws(() => validateInspectionCommand(['git', 'diff', '--output=out.patch']), /not allowed|write files/);
   assert.throws(() => validateInspectionCommand(['git', 'status', '--config=/etc/passwd']), /not allowed|outside/);
   assert.throws(() => validateInspectionCommand(['rg', '--pre=./processor', 'needle', '.']), /not allowed/);
   assert.throws(() => validateInspectionCommand(['fd', '--exec', 'rm', '{}']), /not allowed/);
@@ -54,10 +54,10 @@ test('canonical inspection resolves a root-owned system binary and preserves onl
 
 test('verification executable and grammar cannot be replaced or widened', async () => {
   assert.throws(() => validateVerificationCommand(['/tmp/npm', 'test']), /logical name|never a path/);
-  assert.throws(() => validateVerificationCommand(['npm', 'install']), /restricted/);
+  assert.throws(() => validateVerificationCommand(['npm', 'install']), /restricted|must use/);
   assert.throws(() => validateVerificationCommand(['npm', 'run', 'test', '--', '--config=/etc/passwd']), /restricted|escape/);
   assert.throws(() => validateVerificationCommand(['make', '-f', '/tmp/Makefile']), /escape|target names/);
-  assert.throws(() => validateVerificationCommand(['go', 'test', '-exec=/tmp/tool']), /external tools/);
+  assert.throws(() => validateVerificationCommand(['go', 'test', '-exec=/tmp/tool']), /escape|external tools/);
   const command = await canonicalizeVerificationCommand(['npm', 'run', 'check']);
   assert.match(command[0] ?? '', /^\/usr\//);
 });

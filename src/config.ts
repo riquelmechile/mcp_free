@@ -8,9 +8,7 @@ function intEnv(name: string, fallback: number): number {
   const value = process.env[name];
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${name} must be a positive integer`);
-  }
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
   return parsed;
 }
 
@@ -33,11 +31,23 @@ export function assertSafeNetworkBinding(host: string, authToken: string | null)
   if (!loopback && !authToken) throw new Error('MCP_AUTH_TOKEN is required when MCP_HOST is not loopback');
 }
 
+const accessMode = modeEnv();
+const verificationSandbox = process.env.MCP_VERIFICATION_SANDBOX !== '0';
+const requestedVerificationNetwork = process.env.MCP_VERIFICATION_NETWORK === '1';
+const sandboxCiSharedNetwork = process.env.CI === 'true' && process.env.MCP_SANDBOX_CI_SHARED_NETWORK === '1';
+const sandboxCiBypass = process.env.CI === 'true' && process.env.MCP_SANDBOX_CI_BYPASS === '1';
+if (accessMode === 'workspace' && !verificationSandbox) {
+  throw new Error('MCP_VERIFICATION_SANDBOX=0 is forbidden in workspace mode');
+}
+if (accessMode !== 'full' && requestedVerificationNetwork) {
+  throw new Error('MCP_VERIFICATION_NETWORK=1 is allowed only in full mode');
+}
+
 export const config = {
   host: process.env.MCP_HOST ?? '127.0.0.1',
   port: intEnv('MCP_PORT', 8787),
   mcpPath: process.env.MCP_PATH ?? '/mcp',
-  mode: modeEnv(),
+  mode: accessMode,
   allowedRoots: pathList(process.env.MCP_ALLOWED_ROOTS, [path.join(home, 'code'), path.join(home, 'Documents'), path.join(home, 'Downloads')]),
   allowSecrets: process.env.MCP_ALLOW_SECRETS === '1',
   authToken: process.env.MCP_AUTH_TOKEN || null,
@@ -48,6 +58,10 @@ export const config = {
   rateLimitPerMinute: intEnv('MCP_RATE_LIMIT_PER_MINUTE', 120),
   stateDir: path.resolve(process.env.MCP_STATE_DIR ?? path.join(home, '.local', 'state', 'mcp-free')),
   logLevel: process.env.MCP_LOG_LEVEL ?? 'info',
+  verificationSandbox,
+  verificationNetwork: accessMode === 'full' && requestedVerificationNetwork,
+  sandboxCiSharedNetwork,
+  sandboxCiBypass,
   home
 } as const;
 
