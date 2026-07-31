@@ -14,11 +14,18 @@ jobs:
         with:
           ref: fix/production-hardening
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reconstruct branch preimage
+        run: |
+          npm install --package-lock-only --ignore-scripts
+          git add package-lock.json
       - name: Reconstruct and verify patch
         run: |
           cat .hardening/part-* | base64 -d | gzip -d > /tmp/production-hardening.patch
           echo '635eaed9710b10d346aae570554ae441a392f07a1d9b25148593db26b6ee8e07  /tmp/production-hardening.patch' | sha256sum -c -
-          git apply --check --exclude='.github/workflows/*' /tmp/production-hardening.patch
+          git apply --check --index --exclude='.github/workflows/*' /tmp/production-hardening.patch
       - name: Apply code and push
         run: |
           git config user.name 'github-actions[bot]'
