@@ -9,6 +9,7 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  cancelled?: boolean;
   durationMs: number;
 }
 

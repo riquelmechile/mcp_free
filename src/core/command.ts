@@ -9,6 +9,22 @@ function truncate(value: string, limitBytes: number): string {
   return `${value.slice(0, Math.max(0, limitBytes - 200))}\n...[output truncated; ${bytes} bytes total]`;
 }
 
+function terminateProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        try { process.kill(pid, signal); } catch { /* Process already exited. */ }
+      }
+      return;
+    }
+  }
+  try { process.kill(pid, signal); } catch { /* Process already exited. */ }
+}
+
 export async function runCommand(
   argv: string[],
   options: {
@@ -18,6 +34,7 @@ export async function runCommand(
     maxOutputBytes?: number;
     env?: Record<string, string>;
     stdin?: string;
+    signal?: AbortSignal;
   } = {}
 ): Promise<CommandResult> {
   if (argv.length === 0) throw new Error('argv must not be empty');
@@ -32,29 +49,50 @@ export async function runCommand(
       cwd,
       env: { ...process.env, ...options.env },
       stdio: ['pipe', 'pipe', 'pipe'],
-      detached: false
+      detached: process.platform !== 'win32'
     });
 
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let cancelled = false;
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 2_000).unref();
-    }, timeoutMs);
+    const terminate = (reason: 'timeout' | 'cancel'): void => {
+      if (settled) return;
+      if (reason === 'timeout') timedOut = true;
+      else cancelled = true;
+      terminateProcessGroup(child.pid, 'SIGTERM');
+      forceKillTimer = setTimeout(() => terminateProcessGroup(child.pid, 'SIGKILL'), 2_000);
+      forceKillTimer.unref();
+    };
+
+    const timer = setTimeout(() => terminate('timeout'), timeoutMs);
+    const onAbort = (): void => terminate('cancel');
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener('abort', onAbort, { once: true });
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.on('error', error => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(error);
     });
     child.on('close', (exitCode, signal) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve({
         argv,
         cwd,
@@ -63,6 +101,7 @@ export async function runCommand(
         stdout: truncate(stdout, maxOutputBytes),
         stderr: truncate(stderr, maxOutputBytes),
         timedOut,
+        ...(cancelled ? { cancelled: true } : {}),
         durationMs: Date.now() - started
       });
     });

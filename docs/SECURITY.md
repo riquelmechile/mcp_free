@@ -2,103 +2,72 @@
 
 ## Frontera de confianza
 
-MCP Free ejecuta acciones con el usuario Linux que inicia `mcp-free.service`. En `full`, cualquier archivo o proceso accesible por ese usuario también puede ser accesible por las herramientas.
+MCP Free actúa con el usuario Linux de `mcp-free.service`. Secure MCP Tunnel protege el transporte, pero no reduce permisos locales. Mantenga el listener en loopback; un bind no-loopback sin bearer token es rechazado.
 
-Secure MCP Tunnel protege el transporte y evita un listener público, pero no reduce los permisos locales del proceso MCP. Una cuenta de ChatGPT/Platform comprometida con acceso al túnel sigue siendo un riesgo.
+ChatGPT es el único modelo del flujo de desarrollo. Los workers no interpretan código ni llaman proveedores de IA.
 
-ChatGPT es el único modelo de razonamiento del flujo de desarrollo. Los tres carriles son roles lógicos y workers locales deterministas; el servidor no lanza otros modelos.
+## `observe`, `workspace` y `full`
 
-## Defensas generales
+- `observe`: lectura/percepción; es el modo predeterminado.
+- `workspace`: herramientas de archivo específicas y flujo de desarrollo. No existe terminal genérica.
+- `full`: shell y procesos arbitrarios. Es equivalente a control remoto del usuario Linux y sólo debe usarse en aislamiento.
 
-- Listener recomendado en `127.0.0.1`.
-- Secure MCP Tunnel outbound-only.
-- Rate limit local.
-- Bearer token opcional para otros transportes privados.
-- Modos `observe`, `workspace` y `full`.
-- Bloqueo de credenciales con `MCP_ALLOW_SECRETS=0`.
-- Ejecución `argv` sin shell en `workspace`.
-- Shell arbitraria sólo en `full`.
-- Confirmación del servidor para tiers 2 y 3.
-- Límites de tiempo, lectura y salida.
-- Servicio systemd con `NoNewPrivileges` y protección de kernel/control groups.
-- Runtime API key local con permisos `0600` y reemplazo atómico.
+## Frontera física de archivos
 
-## Defensas del orquestador de desarrollo
+Las rutas se comparan lexical y físicamente contra `MCP_ALLOWED_ROOTS`.
 
-- Ninguna herramienta de desarrollo llama OpenCode, Codex CLI, Claude Code, Gemini CLI u otro LLM.
-- `workspace_execute` bloquea explícitamente esos lanzadores.
-- Máximo de tres carriles lógicos.
-- Los comandos de inspección se ejecutan sin shell y con allowlist.
-- Git de inspección permite únicamente subcomandos de lectura acotados.
-- Se bloquean `git branch`, `remote`, `tag`, `reset`, salida a archivos, external diff, textconv y `--no-index`.
-- Se bloquean preprocessors de ripgrep, ejecución de `fd`, seguimiento de symlinks, rutas absolutas, `..` y rutas con apariencia de credenciales.
-- Los argumentos que existen se validan mediante `lstat` y `realpath` para impedir escapes por symlink.
-- Cada carril necesita evidencia de inspección antes de aceptar su reporte.
-- Todos los carriles configurados deben tener inspección y reporte antes de aplicar código.
-- La orquestación congela rama, HEAD y estado inicial.
-- Si el worktree cambia concurrentemente antes del parche, se rechaza la aplicación.
-- El parche pasa por `git apply --check` antes de escribir.
-- Se bloquean parches binarios, submódulos, symlinks, `.git`, credenciales y escapes de ruta.
-- Se inspeccionan los componentes existentes de cada ruta para evitar atravesar symlinks.
-- Los archivos que ya estaban sucios no pueden tocarse sin aprobación específica.
-- Aplicar el parche y ejecutar tests/builds requieren confirmaciones tier 2 separadas.
-- Las verificaciones personalizadas tienen allowlist y gramática acotada.
-- Después de verificar, se calcula un fingerprint SHA-256 del estado Git, blobs del índice y bytes de archivos modificados/no rastreados.
-- `development_finalize` falla si esos bytes cambian después de la verificación.
-- La cadena de recibos debe estar sana antes de mutar el estado de la orquestación.
+- se valida el ancestro existente mediante `realpath`;
+- se rechazan componentes symlink debajo de la raíz;
+- lectura/escritura de archivos usa `O_NOFOLLOW`;
+- el descriptor abierto se compara con `/proc/self/fd` antes de cambiar bytes;
+- movimientos se anclan a descriptores de directorio;
+- rutas de credenciales se rechazan lexical y físicamente;
+- un lease activo bloquea otras escrituras sobre el worktree.
 
-## Recibos tamper-evident
+`MCP_ALLOW_SECRETS=1` desactiva una barrera importante y no debe usarse normalmente.
 
-La cadena verifica:
+## Desarrollo gobernado
 
-- edición de un recibo;
-- edición del audit;
-- eliminación o reordenamiento;
-- archivos faltantes o huérfanos;
-- chain head incoherente.
+- máximo tres workers;
+- comandos de inspección sin shell y con allowlist;
+- Git sólo de lectura;
+- `rg --pre`, seguimiento de symlinks y acciones `fd --exec` bloqueadas;
+- cada terminal genera SHA-256 de evidencia y receipt encadenado;
+- el estado terminal se rechaza si su hash/receipt no coincide;
+- lock único por orquestación, incluso entre procesos;
+- baseline de rama, HEAD y worktree;
+- parche restringido y `git apply --check`;
+- archivos previamente sucios requieren aprobación específica;
+- lease persistente desde apply hasta finalize;
+- fingerprint pre/post de todos los archivos rastreados y no ignorados;
+- tests que modifican bytes gobernados hacen fallar la verificación;
+- cancelación y timeout terminan el grupo completo de procesos.
 
-Compruebe:
+## Confirmaciones
+
+- tier 0: observación y evidencia.
+- tier 1: metadatos y acciones reversibles acotadas.
+- tier 2: parche, tests/builds, reemplazos, Trash, shell/proceso full.
+- tier 3: borrado permanente y operaciones destructivas/privilegiadas.
+
+Tier 2/3 requiere aprobación explícita y `confirm=true`. Shell/proceso en `full` siempre exige confirmación, incluso si el clasificador considera inocuo el texto.
+
+## Receipts
+
+La cadena verifica identidad, secuencia, enlace anterior, archivos individuales, audit y chain head. Los resultados terminales de carriles se enlazan a la misma cadena.
 
 ```text
 execution_receipts_verify
 ```
 
-Los recibos no son físicamente inmutables. Un atacante con control completo del mismo usuario Linux puede borrar el estado, reemplazar el programa o manipular respaldos. Para evidencia resistente, exporte `~/.local/state/mcp-free` a almacenamiento remoto append-only/WORM o a otra cuenta/host.
+La cadena no es una firma externa ni WORM. Un atacante que controla el usuario y binario puede borrar todo. Exporte el estado a otro host/cuenta append-only para resistencia adicional.
 
-## Runtime API key
+## Riesgos residuales
 
-- No la pegue en ChatGPT, issues, logs ni commits.
-- No la deje exportada más tiempo del necesario.
-- Use `scripts/rotate-tunnel-key.sh`.
-- Rote periódicamente y de inmediato ante exposición.
-- Después de validar la clave nueva, revoque la anterior.
+- tests/builds ejecutan código del repositorio con el usuario del servicio;
+- `full` permite operaciones arbitrarias aprobadas;
+- editores externos no obedecen leases, aunque el fingerprint detecta sus cambios;
+- GUI puede actuar sobre una ventana equivocada si no se verifica foco/captura;
+- un host o cuenta ChatGPT comprometidos superan la protección de aplicación.
 
-Un intervalo de 60–90 días es una política local sugerida, no un requisito oficial.
-
-## Prompt injection
-
-Una captura, web, README, issue, salida de terminal o portapapeles puede contener texto que intente mandar al modelo. Esos datos nunca cambian la política del servidor. La skill obliga a tratarlos como evidencia no confiable.
-
-## Riesgos que permanecen
-
-- Una herramienta `shell_execute` aprobada puede borrar o exfiltrar información.
-- `ydotool` puede actuar en cualquier ventana de la sesión activa.
-- Una captura puede revelar datos privados visibles.
-- `MCP_ALLOW_SECRETS=1` amplía fuertemente el impacto.
-- Una cuenta comprometida de ChatGPT/Platform con acceso al túnel puede invocar herramientas.
-- Tests y builds ejecutan código del repositorio con el usuario Linux del servicio.
-- Las confirmaciones y allowlists no sustituyen un usuario dedicado, contenedor o VM para código no confiable.
-- Los tres carriles no son tres modelos independientes; son separaciones lógicas dentro del mismo ChatGPT.
-
-## Recomendaciones
-
-- Instale inicialmente con `MCP_MODE=observe`.
-- Use `workspace` para desarrollo y reserve `full` para acciones que realmente lo necesiten.
-- Use un usuario Linux dedicado si el equipo contiene información sensible.
-- Mantenga `MCP_HOST=127.0.0.1` y `MCP_ALLOW_SECRETS=0`.
-- No agregue el usuario a `sudoers` sin contraseña.
-- Revise las herramientas al hacer Scan Tools y deshabilite las innecesarias.
-- Conserve confirmaciones de ChatGPT para acciones de escritura.
-- Ejecute periódicamente `execution_receipts_verify`.
-- Respalde la cadena fuera del alcance del usuario MCP.
-- Rote la runtime API key periódicamente y ante incidentes.
+Para código no confiable use un usuario dedicado, contenedor o VM. No agregue sudo sin contraseña.

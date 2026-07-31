@@ -10,8 +10,10 @@ import {
   type OrchestrationState
 } from './development.js';
 import { runCommand } from './command.js';
+import { withOrchestrationLock } from './orchestration-lock.js';
+import { canonicalJson, getReceipt, sha256, verifyReceiptChain, writeReceipt } from './receipts.js';
 
-export type LaneWorkerStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
+export type LaneWorkerStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled';
 export type CoordinatorStatus = 'idle' | 'running' | 'ready_for_synthesis' | 'attention_required';
 
 export interface LaneWorkerRecord {
@@ -23,11 +25,14 @@ export interface LaneWorkerRecord {
   queuedAt: string;
   startedAt?: string;
   completedAt?: string;
+  cancelRequestedAt?: string;
   currentCommandIndex: number;
   totalCommands: number;
   results: CommandResult[];
   error?: string;
   workerInstanceId: string;
+  evidenceSha256?: string;
+  terminalReceiptId?: string;
 }
 
 export interface LaneCoordinatorState {
@@ -53,6 +58,7 @@ export interface LaneCoordinatorSummary {
   completed: string[];
   failed: string[];
   interrupted: string[];
+  cancelled: string[];
   lanes: Array<{
     laneId: string;
     status: LaneWorkerStatus;
@@ -62,18 +68,22 @@ export interface LaneCoordinatorSummary {
     queuedAt: string;
     startedAt?: string;
     completedAt?: string;
+    cancelRequestedAt?: string;
     error?: string;
     resultCount: number;
+    evidenceSha256?: string;
+    terminalReceiptId?: string;
   }>;
 }
 
 const coordinatorRoot = path.join(config.stateDir, 'orchestration-workers');
 const orchestrationRoot = path.join(config.stateDir, 'orchestrations');
-const coordinatorLocks = new Map<string, Promise<void>>();
 const activeWorkers = new Map<string, Promise<void>>();
+const activeControllers = new Map<string, AbortController>();
 const pendingWorkers: Array<{ orchestrationId: string; laneId: string }> = [];
 const workerInstanceId = `worker_${process.pid}_${crypto.randomBytes(8).toString('hex')}`;
 const maximumConcurrentWorkers = 3;
+const terminalStatuses = new Set<LaneWorkerStatus>(['completed', 'failed', 'interrupted', 'cancelled']);
 
 function workerKey(orchestrationId: string, laneId: string): string {
   return `${orchestrationId}:${laneId}`;
@@ -101,24 +111,16 @@ function within(candidate: string, root: string): boolean {
 async function writeJsonAtomic(target: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  await fs.rename(temporary, target);
-  await fs.chmod(target, 0o600);
-}
-
-async function withCoordinatorLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
-  const previous = coordinatorLocks.get(id) ?? Promise.resolve();
-  let release: (() => void) | undefined;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const queued = previous.catch(() => undefined).then(() => gate);
-  coordinatorLocks.set(id, queued);
-  await previous.catch(() => undefined);
+  const handle = await fs.open(temporary, 'wx', 0o600);
   try {
-    return await operation();
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await handle.sync();
   } finally {
-    release?.();
-    if (coordinatorLocks.get(id) === queued) coordinatorLocks.delete(id);
+    await handle.close();
   }
+  await fs.rename(temporary, target);
+  const directory = await fs.open(path.dirname(target), 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 
 function refreshStatus(state: LaneCoordinatorState, configuredLaneCount: number): void {
@@ -127,7 +129,7 @@ function refreshStatus(state: LaneCoordinatorState, configuredLaneCount: number)
     state.status = 'running';
     return;
   }
-  if (statuses.some(status => status === 'failed' || status === 'interrupted')) {
+  if (statuses.some(status => status === 'failed' || status === 'interrupted' || status === 'cancelled')) {
     state.status = 'attention_required';
     return;
   }
@@ -160,24 +162,116 @@ function pendingContains(key: string): boolean {
   return pendingWorkers.some(item => workerKey(item.orchestrationId, item.laneId) === key);
 }
 
-async function reconcileInterrupted(state: LaneCoordinatorState, orchestration: OrchestrationState): Promise<boolean> {
+function evidencePayload(orchestrationId: string, lane: LaneWorkerRecord, terminalStatus: LaneWorkerStatus): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    orchestrationId,
+    laneId: lane.laneId,
+    attempt: lane.attempt,
+    terminalStatus,
+    commands: lane.commands,
+    timeoutMs: lane.timeoutMs,
+    queuedAt: lane.queuedAt,
+    startedAt: lane.startedAt ?? null,
+    currentCommandIndex: lane.currentCommandIndex,
+    totalCommands: lane.totalCommands,
+    results: lane.results,
+    error: lane.error ?? null
+  };
+}
+
+async function bindTerminalEvidence(
+  orchestration: OrchestrationState,
+  lane: LaneWorkerRecord,
+  status: Exclude<LaneWorkerStatus, 'queued' | 'running'>,
+  error?: string
+): Promise<void> {
+  if (error) lane.error = error;
+  else delete lane.error;
+  const payload = evidencePayload(orchestration.id, lane, status);
+  const serialized = canonicalJson(payload);
+  const evidenceSha256 = sha256(serialized);
+  const receipt = await writeReceipt({
+    action: 'development_lane_worker_terminal',
+    riskTier: 0,
+    success: status === 'completed',
+    durationMs: lane.results.reduce((total, result) => total + result.durationMs, 0),
+    target: orchestration.root,
+    output: serialized,
+    details: {
+      orchestrationId: orchestration.id,
+      laneId: lane.laneId,
+      attempt: lane.attempt,
+      terminalStatus: status,
+      evidenceSha256,
+      resultCount: lane.results.length
+    }
+  });
+  lane.status = status;
+  lane.completedAt = new Date().toISOString();
+  lane.evidenceSha256 = evidenceSha256;
+  lane.terminalReceiptId = receipt.id;
+}
+
+async function verifyTerminalEvidence(orchestrationId: string, lane: LaneWorkerRecord): Promise<void> {
+  if (!terminalStatuses.has(lane.status)) return;
+  if (!lane.evidenceSha256 || !lane.terminalReceiptId) {
+    throw new Error(`Terminal lane ${lane.laneId} is missing evidence binding`);
+  }
+  const expected = sha256(canonicalJson(evidencePayload(orchestrationId, lane, lane.status)));
+  if (expected !== lane.evidenceSha256) throw new Error(`Lane ${lane.laneId} evidence hash mismatch`);
+  const receipt = await getReceipt(lane.terminalReceiptId);
+  if (receipt.action !== 'development_lane_worker_terminal'
+      || receipt.details.orchestrationId !== orchestrationId
+      || receipt.details.laneId !== lane.laneId
+      || receipt.details.evidenceSha256 !== lane.evidenceSha256
+      || receipt.details.terminalStatus !== lane.status) {
+    throw new Error(`Lane ${lane.laneId} terminal receipt does not match persisted evidence`);
+  }
+}
+
+function workerPid(instanceId: string): number | null {
+  const match = /^worker_(\d+)_/.exec(instanceId);
+  if (!match) return null;
+  const pid = Number.parseInt(match[1]!, 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function processIsAlive(pid: number | null): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function reconcileInterruptedUnlocked(state: LaneCoordinatorState, orchestration: OrchestrationState): Promise<boolean> {
   let changed = false;
   for (const lane of state.lanes) {
     if (lane.status !== 'queued' && lane.status !== 'running') continue;
     const key = workerKey(state.orchestrationId, lane.laneId);
+    if (activeWorkers.has(key) || pendingContains(key)) continue;
+    const ownerPid = workerPid(lane.workerInstanceId);
     const ownedByThisProcess = lane.workerInstanceId === workerInstanceId;
-    if (!activeWorkers.has(key) && !pendingContains(key) && !ownedByThisProcess) {
-      lane.status = 'interrupted';
-      lane.completedAt = new Date().toISOString();
-      lane.error = 'MCP service restarted or lost the local worker before completion; requeue this lane.';
-      changed = true;
-    }
+    const otherLiveOwner = !ownedByThisProcess && processIsAlive(ownerPid);
+    if (otherLiveOwner) continue;
+    await bindTerminalEvidence(
+      orchestration,
+      lane,
+      'interrupted',
+      ownedByThisProcess
+        ? 'The local worker disappeared from the coordinator queue before completion; resume this lane explicitly.'
+        : 'MCP service restarted or lost the local worker before completion; resume this lane explicitly.'
+    );
+    changed = true;
   }
   if (changed) await saveCoordinator(state, orchestration.lanes.length);
   return changed;
 }
 
-async function loadOrCreateCoordinator(id: string): Promise<{ orchestration: OrchestrationState; coordinator: LaneCoordinatorState }> {
+async function loadOrCreateCoordinatorUnlocked(id: string): Promise<{ orchestration: OrchestrationState; coordinator: LaneCoordinatorState }> {
   const orchestration = await loadOrchestration(id);
   let coordinator = await readRawCoordinator(id);
   if (!coordinator) {
@@ -194,7 +288,7 @@ async function loadOrCreateCoordinator(id: string): Promise<{ orchestration: Orc
     };
     await saveCoordinator(coordinator, orchestration.lanes.length);
   } else {
-    await reconcileInterrupted(coordinator, orchestration);
+    await reconcileInterruptedUnlocked(coordinator, orchestration);
   }
   return { orchestration, coordinator };
 }
@@ -227,26 +321,37 @@ const inspectionEnvironment: Record<string, string> = {
   LANG: 'C'
 };
 
-async function updateLane(
-  orchestrationId: string,
-  laneId: string,
-  updater: (lane: LaneWorkerRecord) => void
-): Promise<LaneCoordinatorState> {
-  return withCoordinatorLock(orchestrationId, async () => {
-    const { orchestration, coordinator } = await loadOrCreateCoordinator(orchestrationId);
+async function updateLane(orchestrationId: string, laneId: string, updater: (lane: LaneWorkerRecord) => void): Promise<void> {
+  await withOrchestrationLock(orchestrationId, async () => {
+    const { orchestration, coordinator } = await loadOrCreateCoordinatorUnlocked(orchestrationId);
     const lane = coordinator.lanes.find(candidate => candidate.laneId === laneId);
     if (!lane) throw new Error(`Unknown queued lane: ${laneId}`);
     updater(lane);
     await saveCoordinator(coordinator, orchestration.lanes.length);
-    return coordinator;
   });
 }
 
-async function executeLane(orchestrationId: string, laneId: string): Promise<void> {
+async function finishLane(
+  orchestrationId: string,
+  laneId: string,
+  status: Exclude<LaneWorkerStatus, 'queued' | 'running'>,
+  error?: string
+): Promise<void> {
+  await withOrchestrationLock(orchestrationId, async () => {
+    const { orchestration, coordinator } = await loadOrCreateCoordinatorUnlocked(orchestrationId);
+    const lane = coordinator.lanes.find(candidate => candidate.laneId === laneId);
+    if (!lane) throw new Error(`Unknown queued lane: ${laneId}`);
+    if (terminalStatuses.has(lane.status)) return;
+    await bindTerminalEvidence(orchestration, lane, status, error);
+    await saveCoordinator(coordinator, orchestration.lanes.length);
+  });
+}
+
+async function executeLane(orchestrationId: string, laneId: string, controller: AbortController): Promise<void> {
   let record: LaneWorkerRecord | undefined;
   let root = '';
-  await withCoordinatorLock(orchestrationId, async () => {
-    const { orchestration, coordinator } = await loadOrCreateCoordinator(orchestrationId);
+  await withOrchestrationLock(orchestrationId, async () => {
+    const { orchestration, coordinator } = await loadOrCreateCoordinatorUnlocked(orchestrationId);
     root = orchestration.root;
     record = coordinator.lanes.find(candidate => candidate.laneId === laneId);
     if (!record || record.status !== 'queued') return;
@@ -259,34 +364,38 @@ async function executeLane(orchestrationId: string, laneId: string): Promise<voi
 
   try {
     for (let index = record.currentCommandIndex; index < record.commands.length; index += 1) {
+      if (controller.signal.aborted) {
+        await finishLane(orchestrationId, laneId, 'cancelled', 'Lane cancelled before the next inspection command started.');
+        return;
+      }
       const result = await runCommand(record.commands[index]!, {
         cwd: root,
         timeoutMs: record.timeoutMs,
         maxTimeoutMs: config.developmentTimeoutMs,
-        env: inspectionEnvironment
+        env: inspectionEnvironment,
+        signal: controller.signal
       });
       await updateLane(orchestrationId, laneId, lane => {
         lane.results.push(result);
         lane.currentCommandIndex = index + 1;
       });
-    }
-    await updateLane(orchestrationId, laneId, lane => {
-      const successful = lane.results.every(result => result.exitCode === 0 && !result.timedOut);
-      lane.status = successful ? 'completed' : 'failed';
-      lane.completedAt = new Date().toISOString();
-      if (!successful) {
-        const failed = lane.results.find(result => result.exitCode !== 0 || result.timedOut);
-        lane.error = failed
-          ? `Inspection command failed: ${failed.argv.join(' ')} (exit ${failed.exitCode}, timedOut=${failed.timedOut})`
-          : 'Inspection lane failed without a command result';
+      if (result.cancelled || controller.signal.aborted) {
+        await finishLane(orchestrationId, laneId, 'cancelled', `Inspection cancelled while running: ${result.argv.join(' ')}`);
+        return;
       }
-    });
+      if (result.exitCode !== 0 || result.timedOut) {
+        await finishLane(
+          orchestrationId,
+          laneId,
+          'failed',
+          `Inspection command failed: ${result.argv.join(' ')} (exit ${result.exitCode}, timedOut=${result.timedOut})`
+        );
+        return;
+      }
+    }
+    await finishLane(orchestrationId, laneId, 'completed');
   } catch (error) {
-    await updateLane(orchestrationId, laneId, lane => {
-      lane.status = 'failed';
-      lane.completedAt = new Date().toISOString();
-      lane.error = error instanceof Error ? error.message : String(error);
-    });
+    await finishLane(orchestrationId, laneId, 'failed', error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -296,13 +405,21 @@ function pumpQueue(): void {
     if (!next) return;
     const key = workerKey(next.orchestrationId, next.laneId);
     if (activeWorkers.has(key)) continue;
-    const task = executeLane(next.orchestrationId, next.laneId)
+    const controller = new AbortController();
+    activeControllers.set(key, controller);
+    const task = executeLane(next.orchestrationId, next.laneId, controller)
       .finally(() => {
         activeWorkers.delete(key);
+        activeControllers.delete(key);
         pumpQueue();
       });
     activeWorkers.set(key, task);
   }
+}
+
+function queueLane(orchestrationId: string, laneId: string): void {
+  const key = workerKey(orchestrationId, laneId);
+  if (!activeWorkers.has(key) && !pendingContains(key)) pendingWorkers.push({ orchestrationId, laneId });
 }
 
 export async function enqueueParallelInspection(
@@ -310,36 +427,31 @@ export async function enqueueParallelInspection(
   requests: LaneInspectionRequest[],
   timeoutMs: number
 ): Promise<LaneCoordinatorState> {
-  const { orchestration } = await loadOrCreateCoordinator(orchestrationId);
-  if (orchestration.status !== 'active') throw new Error(`Parallel inspection requires active status; current status is ${orchestration.status}`);
-  if (requests.length < 1 || requests.length > 3) throw new Error('Between 1 and 3 lane requests are required');
-  const unique = new Set(requests.map(request => request.laneId));
-  if (unique.size !== requests.length) throw new Error('lane_id values must be unique within one enqueue call');
-
-  for (const request of requests) {
-    if (!orchestration.lanes.some(lane => lane.id === request.laneId)) throw new Error(`Unknown lane_id: ${request.laneId}`);
-    if (request.commands.length < 1 || request.commands.length > 8) throw new Error('Each lane requires between 1 and 8 inspection commands');
-    for (const argv of request.commands) {
-      validateInspectionCommand(argv);
-      await assertExistingArgumentsStayInProject(orchestration.root, argv);
+  const coordinator = await withOrchestrationLock(orchestrationId, async () => {
+    const loaded = await loadOrCreateCoordinatorUnlocked(orchestrationId);
+    if (loaded.orchestration.status !== 'active') {
+      throw new Error(`Parallel inspection requires active status; current status is ${loaded.orchestration.status}`);
     }
-  }
+    if (requests.length < 1 || requests.length > 3) throw new Error('Between 1 and 3 lane requests are required');
+    const unique = new Set(requests.map(request => request.laneId));
+    if (unique.size !== requests.length) throw new Error('lane_id values must be unique within one enqueue call');
 
-  const coordinator = await withCoordinatorLock(orchestrationId, async () => {
-    const loaded = await loadOrCreateCoordinator(orchestrationId);
     for (const request of requests) {
-      const previous = loaded.coordinator.lanes.find(lane => lane.laneId === request.laneId);
-      if (previous?.status === 'queued' || previous?.status === 'running') {
-        throw new Error(`Lane ${request.laneId} is already ${previous.status}`);
+      if (!loaded.orchestration.lanes.some(lane => lane.id === request.laneId)) throw new Error(`Unknown lane_id: ${request.laneId}`);
+      if (request.commands.length < 1 || request.commands.length > 8) throw new Error('Each lane requires between 1 and 8 inspection commands');
+      for (const argv of request.commands) {
+        validateInspectionCommand(argv);
+        await assertExistingArgumentsStayInProject(loaded.orchestration.root, argv);
       }
+      const previous = loaded.coordinator.lanes.find(lane => lane.laneId === request.laneId);
+      if (previous?.status === 'queued' || previous?.status === 'running') throw new Error(`Lane ${request.laneId} is already ${previous.status}`);
       if (previous?.status === 'completed') throw new Error(`Lane ${request.laneId} already completed; create a new orchestration to inspect it again`);
-      const attempt = (previous?.attempt ?? 0) + 1;
       const replacement: LaneWorkerRecord = {
         laneId: request.laneId,
         commands: request.commands,
         timeoutMs,
         status: 'queued',
-        attempt,
+        attempt: (previous?.attempt ?? 0) + 1,
         queuedAt: new Date().toISOString(),
         currentCommandIndex: 0,
         totalCommands: request.commands.length,
@@ -348,24 +460,91 @@ export async function enqueueParallelInspection(
       };
       if (previous) Object.assign(previous, replacement);
       else loaded.coordinator.lanes.push(replacement);
+      if (previous) {
+        delete previous.startedAt;
+        delete previous.completedAt;
+        delete previous.cancelRequestedAt;
+        delete previous.error;
+        delete previous.evidenceSha256;
+        delete previous.terminalReceiptId;
+      }
     }
     await saveCoordinator(loaded.coordinator, loaded.orchestration.lanes.length);
     return loaded.coordinator;
   });
 
-  for (const request of requests) {
-    const key = workerKey(orchestrationId, request.laneId);
-    if (!activeWorkers.has(key) && !pendingContains(key)) pendingWorkers.push({ orchestrationId, laneId: request.laneId });
-  }
+  for (const request of requests) queueLane(orchestrationId, request.laneId);
+  pumpQueue();
+  return coordinator;
+}
+
+export async function cancelLaneWorkers(orchestrationId: string, laneIds?: string[]): Promise<LaneCoordinatorState> {
+  const state = await withOrchestrationLock(orchestrationId, async () => {
+    const { orchestration, coordinator } = await loadOrCreateCoordinatorUnlocked(orchestrationId);
+    const targets = laneIds?.length ? new Set(laneIds) : new Set(coordinator.lanes.map(lane => lane.laneId));
+    for (const laneId of targets) {
+      const lane = coordinator.lanes.find(candidate => candidate.laneId === laneId);
+      if (!lane) throw new Error(`Lane ${laneId} has not been queued`);
+      if (lane.status === 'queued') {
+        for (let index = pendingWorkers.length - 1; index >= 0; index -= 1) {
+          if (workerKey(pendingWorkers[index]!.orchestrationId, pendingWorkers[index]!.laneId) === workerKey(orchestrationId, laneId)) {
+            pendingWorkers.splice(index, 1);
+          }
+        }
+        await bindTerminalEvidence(orchestration, lane, 'cancelled', 'Lane cancelled before execution.');
+      } else if (lane.status === 'running') {
+        lane.cancelRequestedAt = new Date().toISOString();
+        activeControllers.get(workerKey(orchestrationId, laneId))?.abort();
+      }
+    }
+    await saveCoordinator(coordinator, orchestration.lanes.length);
+    return coordinator;
+  });
+  return state;
+}
+
+export async function resumeLaneWorkers(orchestrationId: string, laneIds: string[]): Promise<LaneCoordinatorState> {
+  if (laneIds.length < 1 || laneIds.length > 3) throw new Error('Between 1 and 3 lane_ids are required');
+  const coordinator = await withOrchestrationLock(orchestrationId, async () => {
+    const { orchestration, coordinator: current } = await loadOrCreateCoordinatorUnlocked(orchestrationId);
+    if (orchestration.status !== 'active') throw new Error(`Only active orchestrations can resume lanes; current status is ${orchestration.status}`);
+    for (const laneId of new Set(laneIds)) {
+      const lane = current.lanes.find(candidate => candidate.laneId === laneId);
+      if (!lane) throw new Error(`Lane ${laneId} has not been queued`);
+      if (lane.status !== 'failed' && lane.status !== 'interrupted' && lane.status !== 'cancelled') {
+        throw new Error(`Lane ${laneId} is ${lane.status}; only failed, interrupted, or cancelled lanes can resume`);
+      }
+      lane.status = 'queued';
+      lane.attempt += 1;
+      lane.queuedAt = new Date().toISOString();
+      lane.currentCommandIndex = 0;
+      lane.results = [];
+      lane.workerInstanceId = workerInstanceId;
+      delete lane.startedAt;
+      delete lane.completedAt;
+      delete lane.cancelRequestedAt;
+      delete lane.error;
+      delete lane.evidenceSha256;
+      delete lane.terminalReceiptId;
+    }
+    await saveCoordinator(current, orchestration.lanes.length);
+    return current;
+  });
+  for (const laneId of new Set(laneIds)) queueLane(orchestrationId, laneId);
   pumpQueue();
   return coordinator;
 }
 
 export async function getCoordinatorState(orchestrationId: string): Promise<LaneCoordinatorState> {
-  return withCoordinatorLock(orchestrationId, async () => {
-    const { orchestration, coordinator } = await loadOrCreateCoordinator(orchestrationId);
-    await reconcileInterrupted(coordinator, orchestration);
-    return coordinator;
+  return withOrchestrationLock(orchestrationId, async () => {
+    const { orchestration, coordinator } = await loadOrCreateCoordinatorUnlocked(orchestrationId);
+    await reconcileInterruptedUnlocked(coordinator, orchestration);
+    if (coordinator.lanes.some(lane => terminalStatuses.has(lane.status))) {
+      const chain = await verifyReceiptChain();
+      if (!chain.valid) throw new Error(`Receipt chain is invalid; lane evidence cannot be trusted: ${chain.errors.join('; ')}`);
+    }
+    for (const lane of coordinator.lanes) await verifyTerminalEvidence(orchestrationId, lane);
+    return structuredClone(coordinator);
   });
 }
 
@@ -383,6 +562,7 @@ export function summarizeCoordinator(state: LaneCoordinatorState): LaneCoordinat
     completed: byStatus('completed'),
     failed: byStatus('failed'),
     interrupted: byStatus('interrupted'),
+    cancelled: byStatus('cancelled'),
     lanes: state.lanes.map(lane => ({
       laneId: lane.laneId,
       status: lane.status,
@@ -392,17 +572,16 @@ export function summarizeCoordinator(state: LaneCoordinatorState): LaneCoordinat
       queuedAt: lane.queuedAt,
       ...(lane.startedAt ? { startedAt: lane.startedAt } : {}),
       ...(lane.completedAt ? { completedAt: lane.completedAt } : {}),
+      ...(lane.cancelRequestedAt ? { cancelRequestedAt: lane.cancelRequestedAt } : {}),
       ...(lane.error ? { error: lane.error } : {}),
-      resultCount: lane.results.length
+      resultCount: lane.results.length,
+      ...(lane.evidenceSha256 ? { evidenceSha256: lane.evidenceSha256 } : {}),
+      ...(lane.terminalReceiptId ? { terminalReceiptId: lane.terminalReceiptId } : {})
     }))
   };
 }
 
-export async function waitForCoordinatorChange(
-  orchestrationId: string,
-  afterRevision: number,
-  waitMs: number
-): Promise<LaneCoordinatorState> {
+export async function waitForCoordinatorChange(orchestrationId: string, afterRevision: number, waitMs: number): Promise<LaneCoordinatorState> {
   const deadline = Date.now() + Math.max(0, Math.min(waitMs, 30_000));
   while (true) {
     const state = await getCoordinatorState(orchestrationId);
@@ -426,13 +605,14 @@ export async function requireLaneCompleted(orchestrationId: string, laneId: stri
 }
 
 export async function materializeLaneInspection(orchestrationId: string, laneId: string): Promise<OrchestrationState> {
-  return withCoordinatorLock(orchestrationId, async () => {
+  return withOrchestrationLock(orchestrationId, async () => {
     const orchestration = await loadOrchestration(orchestrationId);
     const coordinator = await readRawCoordinator(orchestrationId);
     if (!coordinator) throw new Error(`No lane coordinator exists for ${orchestrationId}`);
     const worker = coordinator.lanes.find(candidate => candidate.laneId === laneId);
     if (!worker) throw new Error(`Lane ${laneId} has not been queued`);
     if (worker.status !== 'completed') throw new Error(`Lane ${laneId} is ${worker.status}; completed evidence is required`);
+    await verifyTerminalEvidence(orchestrationId, worker);
     const lane = orchestration.lanes.find(candidate => candidate.id === laneId);
     if (!lane) throw new Error(`Unknown lane_id: ${laneId}`);
     lane.inspection = {
@@ -440,6 +620,8 @@ export async function materializeLaneInspection(orchestrationId: string, laneId:
       completedAt: worker.completedAt ?? coordinator.updatedAt,
       results: worker.results
     };
+    if (!worker.evidenceSha256) throw new Error(`Lane ${laneId} completed without an evidence hash`);
+    lane.inspectionSha256 = worker.evidenceSha256;
     await writeJsonAtomic(orchestrationStatePath(orchestrationId), orchestration);
     return orchestration;
   });

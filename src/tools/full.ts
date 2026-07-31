@@ -8,30 +8,40 @@ import { clipboardWrite, focusWindow, pointerClick, scroll, sendKey, typeText } 
 import { runCommand } from '../core/command.js';
 import { classifyCommand, requireConfirmation } from '../core/policy.js';
 import { resolveAllowedPath } from '../core/paths.js';
-import { writeReceipt } from '../core/receipts.js';
+import { verifyReceiptChain, writeReceipt } from '../core/receipts.js';
+import { assertPathNotLeased, listWorktreeLeases } from '../core/worktree-lease.js';
 import { errorResult, textResult } from './helpers.js';
+
+async function assertHealthyReceiptChain(): Promise<void> {
+  const verification = await verifyReceiptChain();
+  if (!verification.valid) throw new Error(`Receipt chain is invalid; refusing full-mode action: ${verification.errors.join('; ')}`);
+}
 
 export function registerFullTools(server: McpServer): void {
   server.registerTool('shell_execute', {
     title: 'Execute shell command',
-    description: 'Execute an arbitrary Bash command on the CachyOS host in full-control mode. Risky commands require confirm=true and every call produces a receipt.',
+    description: 'Execute an arbitrary Bash command in full-control mode. Every call requires explicit confirmation and active worktree leases block execution unless separately overridden.',
     inputSchema: {
       command: z.string().min(1).max(100000),
       cwd: z.string().default(config.home),
       timeout_ms: z.number().int().min(100).max(900000).default(config.commandTimeoutMs),
-      confirm: z.boolean().default(false),
+      confirm: z.literal(true),
+      override_active_lease: z.boolean().default(false),
       request_id: z.string().min(8).max(128).optional()
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true }
-  }, async ({ command, cwd, timeout_ms, confirm, request_id }) => {
+  }, async ({ command, cwd, timeout_ms, override_active_lease, request_id }) => {
     const started = Date.now();
     try {
-      const risk = classifyCommand(command);
-      requireConfirmation(risk, confirm);
+      await assertHealthyReceiptChain();
+      const leases = await listWorktreeLeases();
+      if (leases.length > 0 && !override_active_lease) throw new Error(`Active worktree lease(s) block arbitrary shell execution: ${leases.map(lease => lease.orchestrationId).join(', ')}`);
+      const classified = classifyCommand(command);
+      const risk = classified < 2 ? 2 : classified;
       const resolvedCwd = path.resolve(cwd.replace(/^~(?=\/|$)/, config.home));
       const result = await runCommand(['/usr/bin/env', 'bash', '-lc', command], { cwd: resolvedCwd, timeoutMs: timeout_ms });
       const output = `${result.stdout}\n${result.stderr}`;
-      const receipt = await writeReceipt({ action: 'shell_execute', riskTier: risk, success: result.exitCode === 0 && !result.timedOut, durationMs: Date.now() - started, requestId: request_id, command: ['/usr/bin/env', 'bash', '-lc', command], target: resolvedCwd, exitCode: result.exitCode, output, details: { timedOut: result.timedOut, signal: result.signal } });
+      const receipt = await writeReceipt({ action: 'shell_execute', riskTier: risk, success: result.exitCode === 0 && !result.timedOut, durationMs: Date.now() - started, requestId: request_id, command: ['/usr/bin/env', 'bash', '-lc', command], target: resolvedCwd, exitCode: result.exitCode, output, details: { timedOut: result.timedOut, signal: result.signal, overrideActiveLease: override_active_lease } });
       return textResult(`Shell command finished with exit code ${result.exitCode}. Receipt: ${receipt.id}.`, { ...result, riskTier: risk, receipt });
     } catch (error) {
       return errorResult(error);
@@ -48,7 +58,9 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ path: inputPath, permanent, confirm, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const target = await resolveAllowedPath(inputPath, { mustExist: true, write: true });
+      await assertPathNotLeased(target);
       const risk = permanent ? 3 : 2;
       requireConfirmation(risk, confirm);
       let destination: string | null = null;
@@ -70,16 +82,19 @@ export function registerFullTools(server: McpServer): void {
   server.registerTool('process_start', {
     title: 'Start process',
     description: 'Start a detached process from an argv array and return its PID.',
-    inputSchema: { argv: z.array(z.string()).min(1).max(100), cwd: z.string().default(config.home), confirm: z.boolean().default(false), request_id: z.string().min(8).max(128).optional() },
+    inputSchema: { argv: z.array(z.string()).min(1).max(100), cwd: z.string().default(config.home), confirm: z.literal(true), override_active_lease: z.boolean().default(false), request_id: z.string().min(8).max(128).optional() },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }
-  }, async ({ argv, cwd, confirm, request_id }) => {
+  }, async ({ argv, cwd, override_active_lease, request_id }) => {
     const started = Date.now();
     try {
-      const risk = classifyCommand(argv.join(' '));
-      requireConfirmation(risk, confirm);
+      await assertHealthyReceiptChain();
+      const leases = await listWorktreeLeases();
+      if (leases.length > 0 && !override_active_lease) throw new Error(`Active worktree lease(s) block detached process start: ${leases.map(lease => lease.orchestrationId).join(', ')}`);
+      const classified = classifyCommand(argv.join(' '));
+      const risk = classified < 2 ? 2 : classified;
       const child = spawn(argv[0]!, argv.slice(1), { cwd: path.resolve(cwd), detached: true, stdio: 'ignore', env: process.env });
       child.unref();
-      const receipt = await writeReceipt({ action: 'process_start', riskTier: risk, success: true, durationMs: Date.now() - started, requestId: request_id, command: argv, target: cwd, details: { pid: child.pid } });
+      const receipt = await writeReceipt({ action: 'process_start', riskTier: risk, success: true, durationMs: Date.now() - started, requestId: request_id, command: argv, target: cwd, details: { pid: child.pid, overrideActiveLease: override_active_lease } });
       return textResult(`Started PID ${child.pid}. Receipt: ${receipt.id}.`, { pid: child.pid, receipt });
     } catch (error) {
       return errorResult(error);
@@ -94,6 +109,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ pid, signal, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       process.kill(pid, signal);
       const receipt = await writeReceipt({ action: 'process_stop', riskTier: signal === 'SIGKILL' ? 3 : 2, success: true, durationMs: Date.now() - started, requestId: request_id, target: String(pid), details: { signal } });
       return textResult(`Sent ${signal} to PID ${pid}. Receipt: ${receipt.id}.`, { pid, signal, receipt });
@@ -110,6 +126,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ target, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const argv = ['xdg-open', target];
       const child = spawn(argv[0]!, argv.slice(1), { detached: true, stdio: 'ignore', env: process.env });
       child.unref();
@@ -128,6 +145,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ text, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const backend = await clipboardWrite(text);
       const receipt = await writeReceipt({ action: 'clipboard_write', riskTier: 1, success: true, durationMs: Date.now() - started, requestId: request_id, output: text, details: { backend, bytes: Buffer.byteLength(text) } });
       return textResult(`Clipboard updated using ${backend}. Receipt: ${receipt.id}.`, { backend, receipt });
@@ -144,6 +162,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ x, y, button, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const backend = await pointerClick(x, y, button);
       const receipt = await writeReceipt({ action: 'desktop_click', riskTier: 1, success: true, durationMs: Date.now() - started, requestId: request_id, target: `${x},${y}`, details: { button, backend } });
       return textResult(`Clicked ${button} at ${x},${y} using ${backend}. Receipt: ${receipt.id}.`, { x, y, button, backend, receipt });
@@ -160,6 +179,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ text, delay_ms, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const backend = await typeText(text, delay_ms);
       const receipt = await writeReceipt({ action: 'desktop_type', riskTier: 1, success: true, durationMs: Date.now() - started, requestId: request_id, output: text, details: { backend, characters: text.length, delayMs: delay_ms } });
       return textResult(`Typed ${text.length} characters using ${backend}. Receipt: ${receipt.id}.`, { backend, characters: text.length, receipt });
@@ -176,6 +196,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ combo, confirm, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const risky = /alt\+f4|ctrl\+q|delete|backspace/i.test(combo);
       if (risky && !confirm) throw new Error('Potentially destructive shortcut requires confirm=true');
       const backend = await sendKey(combo);
@@ -194,6 +215,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ vertical, horizontal, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const backend = await scroll(vertical, horizontal);
       const receipt = await writeReceipt({ action: 'desktop_scroll', riskTier: 1, success: true, durationMs: Date.now() - started, requestId: request_id, details: { vertical, horizontal, backend } });
       return textResult(`Scrolled using ${backend}. Receipt: ${receipt.id}.`, { vertical, horizontal, backend, receipt });
@@ -210,6 +232,7 @@ export function registerFullTools(server: McpServer): void {
   }, async ({ query, request_id }) => {
     const started = Date.now();
     try {
+      await assertHealthyReceiptChain();
       const backend = await focusWindow(query);
       const receipt = await writeReceipt({ action: 'desktop_focus_window', riskTier: 1, success: true, durationMs: Date.now() - started, requestId: request_id, target: query, details: { backend } });
       return textResult(`Focused a matching window using ${backend}. Receipt: ${receipt.id}.`, { query, backend, receipt });

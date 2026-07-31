@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { runCommand } from './command.js';
 import type { OrchestrationState } from './development.js';
 
-interface FingerprintRecord {
+export interface FingerprintRecord {
   schemaVersion: 1;
   orchestrationId: string;
   root: string;
@@ -25,9 +25,7 @@ function recordPath(id: string): string {
 
 function assertComplete(result: { exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }, label: string): void {
   if (result.exitCode !== 0 || result.timedOut) throw new Error(`${label} failed: ${result.stderr || result.stdout}`);
-  if (result.stdout.includes(TRUNCATED_MARKER) || result.stderr.includes(TRUNCATED_MARKER)) {
-    throw new Error(`${label} exceeded the internal fingerprint limit`);
-  }
+  if (result.stdout.includes(TRUNCATED_MARKER) || result.stderr.includes(TRUNCATED_MARKER)) throw new Error(`${label} exceeded the internal fingerprint limit`);
 }
 
 async function updateFileHash(hash: crypto.Hash, root: string, relative: string): Promise<void> {
@@ -70,36 +68,24 @@ async function updateFileHash(hash: crypto.Hash, root: string, relative: string)
   hash.update('\0');
 }
 
-async function changedPaths(root: string): Promise<{ status: string; paths: string[]; indexEntries: string[] }> {
+async function worktreeInventory(root: string): Promise<{ status: string; paths: string[]; indexEntries: string }> {
   const options = { cwd: root, timeoutMs: 60_000, maxOutputBytes: MAX_INTERNAL_OUTPUT };
-  const [status, unstaged, staged, untracked] = await Promise.all([
+  const [status, tracked, untracked, index] = await Promise.all([
     runCommand(['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], options),
-    runCommand(['git', 'diff', '--name-only', '-z', '--no-ext-diff'], options),
-    runCommand(['git', 'diff', '--cached', '--name-only', '-z', '--no-ext-diff'], options),
-    runCommand(['git', 'ls-files', '--others', '--exclude-standard', '-z'], options)
+    runCommand(['git', 'ls-files', '-z'], options),
+    runCommand(['git', 'ls-files', '--others', '--exclude-standard', '-z'], options),
+    runCommand(['git', 'ls-files', '-s', '-z'], options)
   ]);
   assertComplete(status, 'git status for fingerprint');
-  assertComplete(unstaged, 'git diff names for fingerprint');
-  assertComplete(staged, 'git staged names for fingerprint');
-  assertComplete(untracked, 'git untracked names for fingerprint');
+  assertComplete(tracked, 'git tracked files for fingerprint');
+  assertComplete(untracked, 'git untracked files for fingerprint');
+  assertComplete(index, 'git index for fingerprint');
 
   const paths = new Set<string>();
-  for (const output of [unstaged.stdout, staged.stdout, untracked.stdout]) {
+  for (const output of [tracked.stdout, untracked.stdout]) {
     for (const value of output.split('\0').filter(Boolean)) paths.add(value);
   }
-
-  const indexEntries: string[] = [];
-  for (const relative of [...paths].sort()) {
-    const entry = await runCommand(['git', 'ls-files', '-s', '--', relative], {
-      cwd: root,
-      timeoutMs: 10_000,
-      maxOutputBytes: 64 * 1024
-    });
-    assertComplete(entry, `git index entry for ${relative}`);
-    indexEntries.push(`${relative}\0${entry.stdout}`);
-  }
-
-  return { status: status.stdout, paths: [...paths].sort(), indexEntries };
+  return { status: status.stdout, paths: [...paths].sort(), indexEntries: index.stdout };
 }
 
 export async function computeWorktreeFingerprint(root: string): Promise<string> {
@@ -110,24 +96,30 @@ export async function computeWorktreeFingerprint(root: string): Promise<string> 
   ]);
   identity.forEach((result, index) => assertComplete(result, index === 0 ? 'git branch for fingerprint' : 'git head for fingerprint'));
 
-  const changed = await changedPaths(realRoot);
+  const inventory = await worktreeInventory(realRoot);
   const hash = crypto.createHash('sha256');
   hash.update(`root\0${realRoot}\0branch\0${identity[0]!.stdout.trim()}\0head\0${identity[1]!.stdout.trim()}\0`);
-  hash.update(`status\0${changed.status}\0`);
-  for (const entry of changed.indexEntries) hash.update(`index\0${entry}\0`);
-  for (const relative of changed.paths) await updateFileHash(hash, realRoot, relative);
+  hash.update(`status\0${inventory.status}\0index\0${inventory.indexEntries}\0`);
+  for (const relative of inventory.paths) await updateFileHash(hash, realRoot, relative);
   return hash.digest('hex');
 }
 
 async function writeAtomic(target: string, value: FingerprintRecord): Promise<void> {
   await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  const handle = await fs.open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   await fs.rename(temporary, target);
-  await fs.chmod(target, 0o600);
+  const directory = await fs.open(path.dirname(target), 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 
-export async function recordVerifiedWorktree(state: OrchestrationState): Promise<FingerprintRecord> {
+export async function writeVerifiedWorktreeFingerprint(state: OrchestrationState, fingerprint: string): Promise<FingerprintRecord> {
   if (state.status !== 'verified' || state.verification?.success !== true) {
     throw new Error('A worktree fingerprint can only be recorded after successful verification');
   }
@@ -137,18 +129,26 @@ export async function recordVerifiedWorktree(state: OrchestrationState): Promise
     root: state.root,
     branch: state.baseline.branch,
     head: state.baseline.head,
-    fingerprint: await computeWorktreeFingerprint(state.root),
+    fingerprint,
     recordedAt: new Date().toISOString()
   };
   await writeAtomic(recordPath(state.id), record);
   return record;
 }
 
+export async function recordVerifiedWorktree(state: OrchestrationState): Promise<FingerprintRecord> {
+  return writeVerifiedWorktreeFingerprint(state, await computeWorktreeFingerprint(state.root));
+}
+
+export async function readVerifiedWorktreeFingerprint(id: string): Promise<FingerprintRecord> {
+  const record = JSON.parse(await fs.readFile(recordPath(id), 'utf8')) as FingerprintRecord;
+  if (record.schemaVersion !== 1 || record.orchestrationId !== id) throw new Error('Verification fingerprint record is invalid');
+  return record;
+}
+
 export async function assertVerifiedWorktreeUnchanged(state: OrchestrationState): Promise<FingerprintRecord> {
-  const record = JSON.parse(await fs.readFile(recordPath(state.id), 'utf8')) as FingerprintRecord;
-  if (record.schemaVersion !== 1 || record.orchestrationId !== state.id || record.root !== state.root) {
-    throw new Error('Verification fingerprint record is invalid');
-  }
+  const record = await readVerifiedWorktreeFingerprint(state.id);
+  if (record.root !== state.root) throw new Error('Verification fingerprint record is invalid');
   const current = await computeWorktreeFingerprint(state.root);
   if (current !== record.fingerprint) {
     throw new Error('Worktree bytes or index changed after verification; run development_verify again before finalization');
