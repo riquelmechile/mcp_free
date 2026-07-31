@@ -1,12 +1,77 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
 
-function truncate(value: string, limitBytes: number): string {
-  const bytes = Buffer.byteLength(value);
-  if (bytes <= limitBytes) return value;
-  return `${value.slice(0, Math.max(0, limitBytes - 200))}\n...[output truncated; ${bytes} bytes total]`;
+const TRUSTED_EXECUTABLE_DIRECTORIES = ['/usr/bin', '/usr/local/bin'] as const;
+const TRUSTED_EXECUTABLE_ROOTS = ['/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/usr/local/bin', '/usr/local/lib'] as const;
+
+function within(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function resolveRunExecutable(executable: string): Promise<string> {
+  if (executable.includes('\0')) throw new Error('NUL bytes are not allowed in executable names');
+  if (path.isAbsolute(executable)) return executable;
+  if (path.basename(executable) !== executable || executable.includes('/') || executable.includes('\\')) {
+    throw new Error(`Executable must be an absolute path or a logical system name: ${executable}`);
+  }
+
+  for (const directory of TRUSTED_EXECUTABLE_DIRECTORIES) {
+    const candidate = path.join(directory, executable);
+    try {
+      const physical = await fs.realpath(candidate);
+      const metadata = await fs.stat(physical);
+      if (!metadata.isFile() || metadata.uid !== 0 || (metadata.mode & 0o022) !== 0) continue;
+      if (!TRUSTED_EXECUTABLE_ROOTS.some(root => within(physical, root))) continue;
+      return physical;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  throw new Error(`Trusted root-owned system executable is unavailable: ${executable}`);
+}
+
+function fitUtf8(value: Buffer, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  let text = value.subarray(0, maxBytes).toString('utf8');
+  while (Buffer.byteLength(text) > maxBytes && text.length > 0) text = text.slice(0, -1);
+  return text;
+}
+
+export class BoundedOutputCollector {
+  readonly maxBytes: number;
+  totalBytes = 0;
+  retainedBytes = 0;
+  readonly #chunks: Buffer[] = [];
+
+  constructor(maxBytes: number) {
+    if (!Number.isInteger(maxBytes) || maxBytes <= 0) throw new Error('maxBytes must be a positive integer');
+    this.maxBytes = maxBytes;
+  }
+
+  append(chunk: Buffer | string): void {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    this.totalBytes += buffer.length;
+    const remaining = this.maxBytes - this.retainedBytes;
+    if (remaining <= 0) return;
+    const retained = buffer.subarray(0, Math.min(remaining, buffer.length));
+    if (retained.length > 0) {
+      this.#chunks.push(Buffer.from(retained));
+      this.retainedBytes += retained.length;
+    }
+  }
+
+  render(): string {
+    const retained = Buffer.concat(this.#chunks, this.retainedBytes);
+    if (this.totalBytes <= this.maxBytes) return retained.toString('utf8');
+    const marker = Buffer.from(`\n...[output truncated; ${this.totalBytes} bytes total]`);
+    if (marker.length >= this.maxBytes) return fitUtf8(marker, this.maxBytes);
+    return `${fitUtf8(retained, this.maxBytes - marker.length)}${marker.toString('utf8')}`;
+  }
 }
 
 function terminateProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
@@ -39,6 +104,7 @@ export async function runCommand(
   } = {}
 ): Promise<CommandResult> {
   if (argv.length === 0) throw new Error('argv must not be empty');
+  const resolvedArgv = [await resolveRunExecutable(argv[0]!), ...argv.slice(1)];
   const cwd = path.resolve(options.cwd ?? config.home);
   const maxTimeoutMs = options.maxTimeoutMs ?? 15 * 60_000;
   const timeoutMs = Math.min(options.timeoutMs ?? config.commandTimeoutMs, maxTimeoutMs);
@@ -49,15 +115,15 @@ export async function runCommand(
     : { ...process.env, ...(options.env ?? {}) };
 
   return await new Promise<CommandResult>((resolve, reject) => {
-    const child = spawn(argv[0]!, argv.slice(1), {
+    const child = spawn(resolvedArgv[0]!, resolvedArgv.slice(1), {
       cwd,
       env: childEnvironment,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32'
     });
 
-    let stdout = '';
-    let stderr = '';
+    const stdout = new BoundedOutputCollector(maxOutputBytes);
+    const stderr = new BoundedOutputCollector(maxOutputBytes);
     let timedOut = false;
     let cancelled = false;
     let settled = false;
@@ -83,27 +149,33 @@ export async function runCommand(
       options.signal?.removeEventListener('abort', onAbort);
     };
 
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.on('error', error => {
+    const fail = (error: Error): void => {
       if (settled) return;
       settled = true;
       cleanup();
+      terminateProcessGroup(child.pid, 'SIGKILL');
       reject(error);
+    };
+
+    child.stdout.on('data', chunk => { stdout.append(chunk as Buffer); });
+    child.stderr.on('data', chunk => { stderr.append(chunk as Buffer); });
+    child.stdin.on('error', error => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED') return;
+      fail(error);
     });
+    child.on('error', fail);
     child.on('close', (exitCode, signal) => {
       if (settled) return;
       settled = true;
       cleanup();
       resolve({
-        argv,
+        argv: resolvedArgv,
         cwd,
         exitCode,
         signal,
-        stdout: truncate(stdout, maxOutputBytes),
-        stderr: truncate(stderr, maxOutputBytes),
+        stdout: stdout.render(),
+        stderr: stderr.render(),
         timedOut,
         ...(cancelled ? { cancelled: true } : {}),
         durationMs: Date.now() - started
@@ -116,10 +188,10 @@ export async function runCommand(
 }
 
 export async function commandExists(command: string): Promise<boolean> {
-  const result = await runCommand(['/usr/bin/env', 'bash', '-c', 'command -v -- "$1"', 'mcp-free', command], {
-    timeoutMs: 5_000,
-    inheritEnv: false,
-    env: { PATH: '/usr/bin:/bin' }
-  });
-  return result.exitCode === 0;
+  try {
+    await resolveRunExecutable(command);
+    return true;
+  } catch {
+    return false;
+  }
 }
