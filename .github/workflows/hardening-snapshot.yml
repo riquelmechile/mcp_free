@@ -1,0 +1,25 @@
+name: Hardening snapshot
+
+on:
+  push:
+    branches: [fix/production-hardening]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Package exact workspace
+        run: tar --exclude=.git -czf hardening-workspace.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardening-workspace
+          path: hardening-workspace.tar.gz
+          retention-days: 1
