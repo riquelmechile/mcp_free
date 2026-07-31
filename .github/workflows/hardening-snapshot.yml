@@ -18,9 +18,9 @@ jobs:
           node-version: 22
       - run: npm install
       - name: Package exact workspace
-        run: tar --exclude=.git -czf hardening-workspace.tar.gz .
+        run: tar --exclude=.git -czf /tmp/hardening-workspace.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: hardening-workspace
-          path: hardening-workspace.tar.gz
+          path: /tmp/hardening-workspace.tar.gz
           retention-days: 1
