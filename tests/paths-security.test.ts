@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-test('physical allowed roots reject symlink escapes and credential-like paths', async () => {
+test('physical allowed roots reject symlink escapes, Git metadata writes, and credential-like paths', async () => {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-free-paths-'));
   const physicalRoot = path.join(base, 'physical-root');
   const configuredRoot = path.join(base, 'configured-root');
@@ -17,6 +17,8 @@ test('physical allowed roots reject symlink escapes and credential-like paths', 
   await fs.symlink(outside, path.join(physicalRoot, 'escape'), 'dir');
   await fs.mkdir(path.join(physicalRoot, '.ssh'));
   await fs.writeFile(path.join(physicalRoot, '.ssh', 'id_test'), 'secret\n');
+  await fs.mkdir(path.join(physicalRoot, '.git'));
+  await fs.writeFile(path.join(physicalRoot, '.git', 'config'), '[remote "origin"]\nurl = token@example.invalid\n');
 
   process.env.MCP_MODE = 'workspace';
   process.env.MCP_ALLOWED_ROOTS = configuredRoot;
@@ -40,6 +42,14 @@ test('physical allowed roots reject symlink escapes and credential-like paths', 
     await assert.rejects(
       paths.resolveAllowedPath(path.join(configuredRoot, '.ssh', 'id_test'), { mustExist: true }),
       /Sensitive credential path/
+    );
+    await assert.rejects(
+      paths.resolveAllowedPath(path.join(configuredRoot, '.git', 'config'), { mustExist: true }),
+      /Sensitive credential path/
+    );
+    await assert.rejects(
+      paths.resolveAllowedPath(path.join(configuredRoot, '.git', 'hooks', 'post-checkout'), { write: true }),
+      /may not modify \.git metadata/
     );
     await assert.rejects(
       paths.resolveAllowedPath(path.join(outside, 'secret.txt'), { mustExist: true }),

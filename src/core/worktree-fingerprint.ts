@@ -2,8 +2,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
-import { runCommand } from './command.js';
+import type { CommandResult } from '../types.js';
+import { canonicalizeInspectionCommand } from './command-policy.js';
 import type { OrchestrationState } from './development.js';
+import { runInspectionCommand } from './verification-sandbox.js';
 
 export interface FingerprintRecord {
   schemaVersion: 1;
@@ -17,6 +19,11 @@ export interface FingerprintRecord {
 
 const MAX_INTERNAL_OUTPUT = 16 * 1024 * 1024;
 const TRUNCATED_MARKER = '\n...[output truncated; ';
+
+async function runGit(root: string, logical: string[], timeoutMs: number): Promise<CommandResult> {
+  const canonical = await canonicalizeInspectionCommand(logical, root);
+  return runInspectionCommand(root, canonical, { timeoutMs, maxOutputBytes: MAX_INTERNAL_OUTPUT });
+}
 
 function recordPath(id: string): string {
   if (!/^orch_[a-f0-9]{24}$/.test(id)) throw new Error('Invalid orchestration_id');
@@ -69,12 +76,11 @@ async function updateFileHash(hash: crypto.Hash, root: string, relative: string)
 }
 
 async function worktreeInventory(root: string): Promise<{ status: string; paths: string[]; indexEntries: string }> {
-  const options = { cwd: root, timeoutMs: 60_000, maxOutputBytes: MAX_INTERNAL_OUTPUT };
   const [status, tracked, untracked, index] = await Promise.all([
-    runCommand(['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], options),
-    runCommand(['git', 'ls-files', '-z'], options),
-    runCommand(['git', 'ls-files', '--others', '--exclude-standard', '-z'], options),
-    runCommand(['git', 'ls-files', '-s', '-z'], options)
+    runGit(root, ['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], 60_000),
+    runGit(root, ['git', 'ls-files', '-z'], 60_000),
+    runGit(root, ['git', 'ls-files', '--others', '--exclude-standard', '-z'], 60_000),
+    runGit(root, ['git', 'ls-files', '-s', '-z'], 60_000)
   ]);
   assertComplete(status, 'git status for fingerprint');
   assertComplete(tracked, 'git tracked files for fingerprint');
@@ -91,8 +97,8 @@ async function worktreeInventory(root: string): Promise<{ status: string; paths:
 export async function computeWorktreeFingerprint(root: string): Promise<string> {
   const realRoot = await fs.realpath(root);
   const identity = await Promise.all([
-    runCommand(['git', 'branch', '--show-current'], { cwd: realRoot, timeoutMs: 10_000 }),
-    runCommand(['git', 'rev-parse', '--verify', 'HEAD'], { cwd: realRoot, timeoutMs: 10_000 })
+    runGit(realRoot, ['git', 'rev-parse', '--abbrev-ref', 'HEAD'], 10_000),
+    runGit(realRoot, ['git', 'rev-parse', '--verify', 'HEAD'], 10_000)
   ]);
   identity.forEach((result, index) => assertComplete(result, index === 0 ? 'git branch for fingerprint' : 'git head for fingerprint'));
 

@@ -34,6 +34,8 @@ test('inspection commands remain read-only and project-local', () => {
   assert.throws(() => validateInspectionCommand(['sed', '-i', 's\/a\/b\/', 'file.ts']), /not allowed/);
   assert.throws(() => validateInspectionCommand(['cat', '../secret']), /stay inside/);
   assert.throws(() => validateInspectionCommand(['cat', '.env']), /Credential-like/);
+  assert.throws(() => validateInspectionCommand(['/tmp/git', 'status']), /logical name|never a path/);
+  assert.throws(() => validateInspectionCommand(['./git', 'status']), /logical name|never a path/);
 });
 
 test('extracts bounded patch paths and rejects unsafe patch types', () => {

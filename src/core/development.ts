@@ -3,8 +3,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import type { CommandResult } from '../types.js';
-import { runCommand } from './command.js';
+import {
+  canonicalizeInspectionCommand,
+  canonicalizeVerificationCommand,
+  resolveTrustedExecutable,
+  validateInspectionCommand as validateInspectionCommandPolicy,
+  validateVerificationCommand as validateVerificationCommandPolicy
+} from './command-policy.js';
 import { withOrchestrationLock } from './orchestration-lock.js';
+import { runInspectionCommand, runVerificationCommand } from './verification-sandbox.js';
 import {
   assertVerifiedWorktreeUnchanged,
   computeWorktreeFingerprint,
@@ -151,20 +158,50 @@ async function saveOrchestration(state: OrchestrationState): Promise<void> {
   await writeJsonAtomic(orchestrationPath(state.id), state);
 }
 
+async function findStandardGitRoot(cwd: string): Promise<string> {
+  let cursor = await fs.realpath(cwd);
+  const metadata = await fs.stat(cursor);
+  if (!metadata.isDirectory()) cursor = path.dirname(cursor);
+  while (true) {
+    const gitMetadata = path.join(cursor, '.git');
+    try {
+      const gitStat = await fs.lstat(gitMetadata);
+      if (gitStat.isDirectory()) return cursor;
+      if (gitStat.isFile()) {
+        throw new Error('Linked Git worktrees and submodules are rejected because their metadata lives outside the sandbox root');
+      }
+      throw new Error(`Unsupported Git metadata entry: ${gitMetadata}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) throw new Error('Development orchestration requires a standard Git worktree with a .git directory');
+    cursor = parent;
+  }
+}
+
 export async function captureGitSnapshot(cwd: string): Promise<GitSnapshot> {
-  const rootResult = await runCommand(['git', 'rev-parse', '--show-toplevel'], { cwd, timeoutMs: 10_000 });
-  if (rootResult.exitCode !== 0) throw new Error(`Development orchestration requires a Git worktree: ${cleanOutput(rootResult)}`);
-  const root = await fs.realpath(rootResult.stdout.trim());
-  const [branch, head, status, diffStat] = await Promise.all([
-    runCommand(['git', 'branch', '--show-current'], { cwd: root, timeoutMs: 10_000 }),
-    runCommand(['git', 'rev-parse', '--verify', 'HEAD'], { cwd: root, timeoutMs: 10_000 }),
-    runCommand(['git', 'status', '--porcelain=v1', '--untracked-files=all'], { cwd: root, timeoutMs: 15_000 }),
-    runCommand(['git', 'diff', '--stat', '--no-ext-diff'], { cwd: root, timeoutMs: 15_000 })
-  ]);
+  const root = await findStandardGitRoot(cwd);
+  const logicalCommands = [
+    ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+    ['git', 'rev-parse', '--verify', 'HEAD'],
+    ['git', 'status', '--porcelain=v1', '--untracked-files=all'],
+    ['git', 'diff', '--stat']
+  ];
+  const canonical = await Promise.all(logicalCommands.map(command => canonicalizeInspectionCommand(command, root)));
+  const results = await Promise.all(canonical.map(command => runInspectionCommand(root, command, { timeoutMs: 15_000 })));
+  const branch = results[0];
+  const head = results[1];
+  const status = results[2];
+  const diffStat = results[3];
+  if (!branch || !head || !status || !diffStat) throw new Error('Incomplete Git snapshot results');
+  for (const result of results) {
+    if (result.exitCode !== 0 || result.timedOut) throw new Error(`Sandboxed Git snapshot failed: ${cleanOutput(result)}`);
+  }
   return {
     root,
     branch: branch.stdout.trim() || '(detached)',
-    head: head.exitCode === 0 ? head.stdout.trim() : null,
+    head: head.stdout.trim() || null,
     status: status.stdout.trim(),
     diffStat: diffStat.stdout.trim()
   };
@@ -308,72 +345,10 @@ export async function cleanupOrchestrations(olderThanMs: number): Promise<string
   return removed;
 }
 
-const INSPECTION_EXECUTABLES = new Set(['git', 'rg', 'fd', 'ls', 'cat', 'head', 'tail', 'wc', 'jq', 'stat']);
-const READ_ONLY_GIT_SUBCOMMANDS = new Set(['status', 'diff', 'log', 'show', 'grep', 'ls-files', 'rev-parse', 'describe']);
+export const validateInspectionCommand = validateInspectionCommandPolicy;
+export const validateVerificationCommand = validateVerificationCommandPolicy;
+
 const SENSITIVE_ARG = /(^|\/)(\.env(?:\.|$)|\.ssh|\.gnupg|secrets?|credentials?)(\/|$)|\.(?:pem|key)$/i;
-const BLOCKED_GIT_ARGUMENTS = [
-  '--output', '--ext-diff', '--textconv', '--no-index', '--open-files-in-pager',
-  '--exec-path', '--git-dir', '--work-tree', '--config-env'
-];
-
-function assertSafeArgument(argument: string): void {
-  if (argument.includes('\0')) throw new Error('NUL bytes are not allowed in command arguments');
-  if (argument.startsWith('/') || argument.startsWith('~') || argument === '..' || argument.startsWith('../') || argument.includes('/../')) {
-    throw new Error(`Arguments must stay inside the project: ${argument}`);
-  }
-  if (SENSITIVE_ARG.test(argument)) throw new Error(`Credential-like paths are blocked: ${argument}`);
-}
-
-function hasBlockedPrefix(argument: string, blocked: string[]): boolean {
-  return blocked.some(value => argument === value || argument.startsWith(`${value}=`));
-}
-
-export function validateInspectionCommand(argv: string[]): void {
-  if (argv.length === 0) throw new Error('Inspection command must not be empty');
-  if (argv.length > 100) throw new Error('Inspection command is too long');
-  const executable = path.basename(argv[0]!);
-  if (!INSPECTION_EXECUTABLES.has(executable)) throw new Error(`Inspection executable is not allowed: ${executable}`);
-  for (const argument of argv.slice(1)) assertSafeArgument(argument);
-  if (executable === 'git') {
-    const subcommand = argv[1];
-    if (!subcommand || !READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) throw new Error(`Git subcommand is not read-only: ${subcommand ?? '(missing)'}`);
-    if (argv.some(argument => hasBlockedPrefix(argument, BLOCKED_GIT_ARGUMENTS))) throw new Error('Git argument can write files, escape the worktree, or execute configured helpers');
-  }
-  if (executable === 'rg') {
-    const blocked = ['--pre', '--pre-glob', '--follow', '-L'];
-    if (argv.some(argument => hasBlockedPrefix(argument, blocked))) throw new Error('ripgrep preprocessors and symlink following are not allowed');
-  }
-  if (executable === 'fd') {
-    const blocked = ['--exec', '--exec-batch', '-x', '-X', '--follow', '-L'];
-    if (argv.some(argument => hasBlockedPrefix(argument, blocked))) throw new Error('fd execution actions and symlink following are not allowed');
-  }
-}
-
-async function assertExistingArgumentsStayInProject(root: string, argv: string[]): Promise<void> {
-  const realRoot = await fs.realpath(root);
-  for (const argument of argv.slice(1)) {
-    if (argument === '-' || argument.startsWith('-')) continue;
-    const candidate = path.resolve(realRoot, argument);
-    if (!within(candidate, realRoot)) throw new Error(`Argument resolves outside project: ${argument}`);
-    let metadata;
-    try { metadata = await fs.lstat(candidate); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
-    if (metadata.isSymbolicLink()) throw new Error(`Explicit symlink arguments are blocked during inspection: ${argument}`);
-    const resolved = await fs.realpath(candidate);
-    if (!within(resolved, realRoot)) throw new Error(`Argument resolves outside project through filesystem links: ${argument}`);
-  }
-}
-
-const INSPECTION_ENV: Record<string, string> = {
-  GIT_PAGER: 'cat',
-  PAGER: 'cat',
-  GIT_OPTIONAL_LOCKS: '0',
-  RIPGREP_CONFIG_PATH: '/dev/null',
-  NO_COLOR: '1',
-  LANG: 'C'
-};
 
 export async function recordLaneReport(id: string, input: {
   laneId: string;
@@ -473,9 +448,16 @@ export async function applyOrchestrationPatch(id: string, patchText: string, all
       if (overlap.length > 0 && !allowTouchDirty) {
         throw new Error(`Patch touches pre-existing dirty paths: ${overlap.join(', ')}. Set allow_touch_dirty=true only after reviewing those exact files.`);
       }
-      const check = await runCommand(['git', 'apply', '--check', '--', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 60_000 });
+      const git = await resolveTrustedExecutable('git');
+      const check = await runVerificationCommand(state.root, [git, 'apply', '--check', '--', '-'], {
+        stdin: patchText,
+        timeoutMs: 60_000
+      });
       if (check.exitCode !== 0 || check.timedOut) throw new Error(`git apply --check failed: ${cleanOutput(check)}`);
-      const apply = await runCommand(['git', 'apply', '--whitespace=nowarn', '--', '-'], { cwd: state.root, stdin: patchText, timeoutMs: 120_000 });
+      const apply = await runVerificationCommand(state.root, [git, 'apply', '--whitespace=nowarn', '--', '-'], {
+        stdin: patchText,
+        timeoutMs: 120_000
+      });
       if (apply.exitCode !== 0 || apply.timedOut) throw new Error(`git apply failed after a successful check: ${cleanOutput(apply)}`);
       const after = await captureGitSnapshot(state.root);
       state.status = 'applied';
@@ -492,22 +474,6 @@ export async function applyOrchestrationPatch(id: string, patchText: string, all
   });
 }
 
-const VERIFICATION_EXECUTABLES = new Set(['git', 'npm', 'pnpm', 'yarn', 'tsc', 'python', 'python3', 'pytest', 'go', 'cargo', 'make', 'cmake', 'ninja']);
-
-export function validateVerificationCommand(argv: string[]): void {
-  if (argv.length === 0) throw new Error('Verification command must not be empty');
-  if (argv.length > 100) throw new Error('Verification command is too long');
-  const executable = path.basename(argv[0]!);
-  if (!VERIFICATION_EXECUTABLES.has(executable)) throw new Error(`Verification executable is not allowed: ${executable}`);
-  for (const argument of argv.slice(1)) assertSafeArgument(argument);
-  if (executable === 'git' && !(argv[1] === 'diff' && argv.includes('--check'))) throw new Error('Only git diff --check is allowed as a custom verification command');
-  if ((executable === 'npm' || executable === 'pnpm') && argv[1] !== 'run' && argv[1] !== 'test') throw new Error(`${executable} verification must use run or test`);
-  if (executable === 'yarn' && argv[1] !== 'run' && argv[1] !== 'test') throw new Error('yarn verification must use run or test');
-  if ((executable === 'python' || executable === 'python3') && !(argv[1] === '-m' && argv[2] === 'pytest')) throw new Error('Python verification is limited to -m pytest');
-  if (executable === 'go' && argv[1] !== 'test') throw new Error('Go verification is limited to go test');
-  if (executable === 'cargo' && argv[1] !== 'test' && argv[1] !== 'check') throw new Error('Cargo verification is limited to cargo test/check');
-}
-
 export async function verifyOrchestration(id: string, commands: string[][], timeoutMs: number): Promise<OrchestrationState> {
   return withOrchestrationLock(id, async () => {
     const state = await loadOrchestration(id);
@@ -515,15 +481,16 @@ export async function verifyOrchestration(id: string, commands: string[][], time
     await acquireWorktreeLease(state.root, state.id);
     try {
       commands.forEach(validateVerificationCommand);
-      for (const argv of commands) await assertExistingArgumentsStayInProject(state.root, argv);
+      const canonicalCommands = await Promise.all(commands.map(command => canonicalizeVerificationCommand(command)));
       const current = await captureGitSnapshot(state.root);
       if (current.head !== state.baseline.head || current.branch !== state.baseline.branch) throw new Error('Git branch or HEAD changed during orchestration');
 
       const preFingerprint = await computeWorktreeFingerprint(state.root);
-      const diffCheck = await runCommand(['git', 'diff', '--check', '--no-ext-diff'], { cwd: state.root, timeoutMs: 60_000, env: INSPECTION_ENV });
+      const diffCommand = await canonicalizeInspectionCommand(['git', 'diff', '--check'], state.root);
+      const diffCheck = await runInspectionCommand(state.root, diffCommand, { timeoutMs: 60_000 });
       const results: CommandResult[] = [];
-      for (const argv of commands) {
-        results.push(await runCommand(argv, { cwd: state.root, timeoutMs, maxTimeoutMs: config.developmentTimeoutMs, env: { NO_COLOR: '1' } }));
+      for (const command of canonicalCommands) {
+        results.push(await runVerificationCommand(state.root, command, { timeoutMs, maxTimeoutMs: config.developmentTimeoutMs }));
       }
       const postFingerprint = await computeWorktreeFingerprint(state.root);
       const worktreeStable = preFingerprint === postFingerprint;
@@ -532,14 +499,8 @@ export async function verifyOrchestration(id: string, commands: string[][], time
         && !diffCheck.timedOut
         && results.every(result => result.exitCode === 0 && !result.timedOut && !result.cancelled);
       state.verification = {
-        completedAt: new Date().toISOString(),
-        success,
-        diffCheck,
-        commands,
-        results,
-        preFingerprint,
-        postFingerprint,
-        worktreeStable
+        completedAt: new Date().toISOString(), success, diffCheck, commands, results,
+        preFingerprint, postFingerprint, worktreeStable
       };
       state.status = success ? 'verified' : 'verification_failed';
       await saveOrchestration(state);

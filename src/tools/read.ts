@@ -6,8 +6,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { captureScreenshot, clipboardRead, detectDesktopCapabilities, listWindows } from '../adapters/desktop.js';
-import { commandExists, runCommand } from '../core/command.js';
+import { runCommand } from '../core/command.js';
+import { canonicalizeInspectionCommand } from '../core/command-policy.js';
 import { revalidateAllowedPath, resolveAllowedPath } from '../core/paths.js';
+import { assertOpenedDescriptorAllowed } from '../core/safe-fs.js';
+import { runInspectionCommand } from '../core/verification-sandbox.js';
 import { getReceipt, listReceipts, verifyReceiptChain } from '../core/receipts.js';
 import { describePolicy } from '../core/policy.js';
 import { errorResult, textResult } from './helpers.js';
@@ -98,7 +101,7 @@ export function registerReadTools(server: McpServer): void {
       const target = await resolveAllowedPath(inputPath, { mustExist: true });
       const handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
-        await revalidateAllowedPath(target, { mustExist: true });
+        await assertOpenedDescriptorAllowed(handle, { expectedPath: target });
         const buffer = Buffer.alloc(max_bytes);
         const { bytesRead } = await handle.read(buffer, 0, max_bytes, offset);
         const stat = await handle.stat();
@@ -126,16 +129,13 @@ export function registerReadTools(server: McpServer): void {
   }, async ({ root, query, mode, max_results }) => {
     try {
       const target = await resolveAllowedPath(root, { mustExist: true });
-      let result;
-      if (mode === 'content' && await commandExists('rg')) {
-        result = await runCommand(['rg', '--line-number', '--hidden', '--glob', '!.git', '--max-count', String(max_results), '--', query, target], { timeoutMs: 30_000, env: { RIPGREP_CONFIG_PATH: '/dev/null' } });
-      } else if (mode === 'filename' && await commandExists('fd')) {
-        result = await runCommand(['fd', '--hidden', '--exclude', '.git', '--max-results', String(max_results), '--', query, target], { timeoutMs: 30_000 });
-      } else if (mode === 'filename') {
-        result = await runCommand(['find', target, '-type', 'f', '-iname', `*${query}*`, '-print'], { timeoutMs: 30_000 });
-      } else {
-        result = await runCommand(['grep', '-rIn', '--exclude-dir=.git', '--', query, target], { timeoutMs: 30_000 });
-      }
+      const logical = mode === 'content'
+        ? ['rg', '--line-number', '--hidden', '--no-ignore', '--no-messages', '--max-count', String(max_results), '--', query, '.']
+        : ['fd', '--hidden', '--exclude', '.git', '--max-results', String(max_results), '--', query, '.'];
+      const canonical = await canonicalizeInspectionCommand(logical, target);
+      const result = await runInspectionCommand(target, canonical, { timeoutMs: 30_000 });
+      result.stdout = result.stdout.replaceAll('/workspace', target);
+      result.stderr = result.stderr.replaceAll('/workspace', target);
       const lines = result.stdout.split('\n').filter(Boolean);
       return textResult(`Search completed in ${target}.`, {
         root: target,

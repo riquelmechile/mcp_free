@@ -33,6 +33,7 @@ export async function runCommand(
     maxTimeoutMs?: number;
     maxOutputBytes?: number;
     env?: Record<string, string>;
+    inheritEnv?: boolean;
     stdin?: string;
     signal?: AbortSignal;
   } = {}
@@ -43,11 +44,14 @@ export async function runCommand(
   const timeoutMs = Math.min(options.timeoutMs ?? config.commandTimeoutMs, maxTimeoutMs);
   const maxOutputBytes = Math.min(options.maxOutputBytes ?? config.maxOutputBytes, 16 * 1024 * 1024);
   const started = Date.now();
+  const childEnvironment = options.inheritEnv === false
+    ? { ...(options.env ?? {}) }
+    : { ...process.env, ...(options.env ?? {}) };
 
   return await new Promise<CommandResult>((resolve, reject) => {
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd,
-      env: { ...process.env, ...options.env },
+      env: childEnvironment,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32'
     });
@@ -112,6 +116,10 @@ export async function runCommand(
 }
 
 export async function commandExists(command: string): Promise<boolean> {
-  const result = await runCommand(['/usr/bin/env', 'bash', '-c', 'command -v -- "$1"', 'mcp-free', command], { timeoutMs: 5_000 });
+  const result = await runCommand(['/usr/bin/env', 'bash', '-c', 'command -v -- "$1"', 'mcp-free', command], {
+    timeoutMs: 5_000,
+    inheritEnv: false,
+    env: { PATH: '/usr/bin:/bin' }
+  });
   return result.exitCode === 0;
 }

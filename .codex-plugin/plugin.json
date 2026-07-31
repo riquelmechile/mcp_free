@@ -1,6 +1,6 @@
 {
   "name": "mcp-free-cachyos",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Hardened ChatGPT-native computer control with evidence-bound persistent development workers for CachyOS.",
   "repository": "https://github.com/riquelmechile/mcp_free",
   "license": "MIT",
