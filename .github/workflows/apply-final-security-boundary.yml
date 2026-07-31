@@ -1,0 +1,44 @@
+name: Apply final security boundary
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/final-security-boundary
+          fetch-depth: 0
+      - name: Install sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep jq fd-find
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply migration
+        run: python3 scripts/apply-final-boundary.py
+      - name: Refresh lockfile
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Install reproducibly
+        run: npm ci
+      - name: Typecheck and test
+        run: npm run check
+      - name: Build
+        run: npm run build
+      - name: Commit candidate
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: enforce canonical sandboxed command boundary [boundary-applied]'
+          git push origin HEAD:fix/final-security-boundary
