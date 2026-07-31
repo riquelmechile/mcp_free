@@ -4,5 +4,6 @@ dist/
 *.log
 coverage/
 .mcp-free/
+.hardening/
 *.png
 .DS_Store
