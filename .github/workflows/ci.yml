@@ -8,15 +8,32 @@ on:
 permissions:
   contents: read
 
+env:
+  MCP_SANDBOX_CI_BYPASS: '1'
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install sandbox and inspection dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep jq fd-find
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: Expose setup-node npm through a trusted root-owned wrapper
+        run: |
+          NODE_BIN="$(command -v node)"
+          NPM_CLI="$(npm root -g)/npm/bin/npm-cli.js"
+          sudo tee /usr/local/bin/npm >/dev/null <<EOF
+          #!/bin/sh
+          exec "$NODE_BIN" "$NPM_CLI" "\$@"
+          EOF
+          sudo chown root:root /usr/local/bin/npm
+          sudo chmod 0755 /usr/local/bin/npm
       - name: Validate scripts and manifests
         run: |
           bash -n scripts/*.sh
