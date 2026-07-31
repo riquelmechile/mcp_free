@@ -6,16 +6,21 @@ import test from 'node:test';
 import { runCommand } from '../src/core/command.js';
 import { buildSandboxArgv } from '../src/core/verification-sandbox.js';
 
-test('sandbox command clears environment, removes network, and exposes only the worktree writable', () => {
-  const argv = buildSandboxArgv('/usr/bin/bwrap', '/home/user/code/project', ['/usr/bin/npm', 'test'], {
+test('sandbox command clears environment, removes network, protects Git metadata, and exposes only the worktree writable', () => {
+  const root = '/home/user/code/project';
+  const argv = buildSandboxArgv('/usr/bin/bwrap', root, ['/usr/bin/npm', 'test'], {
     writable: true,
     network: false
   });
   assert.equal(argv.includes('--clearenv'), true);
   assert.equal(argv.includes('--unshare-user'), true);
   assert.equal(argv.includes('--unshare-pid'), true);
+  assert.equal(argv.includes('--unshare-net'), true);
   assert.equal(argv.includes('--share-net'), false);
-  assert.deepEqual(argv.slice(argv.indexOf('--bind'), argv.indexOf('--bind') + 3), ['--bind', '/home/user/code/project', '/workspace']);
+  assert.deepEqual(argv.slice(argv.indexOf('--bind'), argv.indexOf('--bind') + 3), ['--bind', root, '/workspace']);
+  const gitBind = argv.findIndex((value, index) => value === '--ro-bind' && argv[index + 1] === path.join(root, '.git'));
+  assert.notEqual(gitBind, -1);
+  assert.deepEqual(argv.slice(gitBind, gitBind + 3), ['--ro-bind', path.join(root, '.git'), '/workspace/.git']);
   assert.equal(argv.includes('/home/user/.local/state/mcp-free'), false);
   assert.equal(argv.includes('MCP_AUTH_TOKEN'), false);
 });
@@ -25,7 +30,7 @@ test('inspection sandbox mounts the project read-only', () => {
     writable: false,
     network: false
   });
-  const index = argv.indexOf('--ro-bind', argv.indexOf('--tmpfs'));
+  const index = argv.findIndex((value, candidate) => value === '--ro-bind' && argv[candidate + 1] === '/tmp/project');
   assert.deepEqual(argv.slice(index, index + 3), ['--ro-bind', '/tmp/project', '/workspace']);
 });
 
@@ -54,6 +59,7 @@ test('bubblewrap smoke test isolates an actual temporary worktree when available
   }
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-free-bwrap-'));
   try {
+    await fs.mkdir(path.join(root, '.git'));
     await fs.writeFile(path.join(root, 'visible.txt'), 'inside\n');
     const argv = buildSandboxArgv('/usr/bin/bwrap', root, ['/usr/bin/cat', 'visible.txt'], {
       writable: false,
