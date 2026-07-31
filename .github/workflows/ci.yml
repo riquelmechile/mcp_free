@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   MCP_SANDBOX_CI_BYPASS: '1'
@@ -16,9 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/final-security-boundary
-          fetch-depth: 0
       - name: Install sandbox and inspection dependencies
         run: |
           sudo apt-get update
@@ -37,14 +34,6 @@ jobs:
           EOF
           sudo chown root:root /usr/local/bin/npm
           sudo chmod 0755 /usr/local/bin/npm
-      - name: Apply final Git sandbox migration
-        run: |
-          if ! grep -q 'async function findStandardGitRoot' src/core/development.ts; then
-            python3 scripts/migrate-sandbox-all-git.py
-          fi
-          python3 scripts/fix-sandbox-migration-types.py
-      - name: Refresh lockfile
-        run: npm install --package-lock-only --ignore-scripts
       - name: Validate scripts and manifests
         run: |
           bash -n scripts/*.sh
@@ -53,7 +42,7 @@ jobs:
       - name: Audit all dependencies
         run: npm audit --audit-level=moderate
       - name: Check
-        run: npm run check | tee ci-log.txt
+        run: npm run check > ci-log.txt 2>&1
       - name: Upload diagnostic log
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
@@ -63,14 +52,3 @@ jobs:
       - run: npm run build
       - name: Validate package contents
         run: npm pack --dry-run
-      - name: Commit generated migration
-        run: |
-          if git diff --quiet && git diff --cached --quiet; then
-            echo 'No generated migration changes'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git commit -m 'security: sandbox all internal Git execution [git-sandbox-applied]'
-          git push origin HEAD:fix/final-security-boundary
