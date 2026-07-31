@@ -42,6 +42,7 @@ jobs:
           if ! grep -q 'async function findStandardGitRoot' src/core/development.ts; then
             python3 scripts/migrate-sandbox-all-git.py
           fi
+          python3 scripts/fix-sandbox-migration-types.py
       - name: Validate scripts and manifests
         run: |
           bash -n scripts/*.sh
