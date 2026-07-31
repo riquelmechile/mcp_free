@@ -12,6 +12,10 @@ function within(candidate: string, root: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function containsGitMetadataComponent(candidate: string): boolean {
+  return path.resolve(candidate).split(path.sep).some(component => component === '.git');
+}
+
 export function isSensitivePath(candidate: string): boolean {
   const normalized = `${path.resolve(candidate).replaceAll('\\', '/')}/`;
   return sensitivePathFragments.some(fragment => normalized.includes(fragment));
@@ -75,6 +79,9 @@ async function assertPhysicalPolicy(absolute: string, options: { mustExist?: boo
   const roots = await allowedRoots();
   const lexicalRoot = matchLexicalRoot(absolute, roots);
   if (config.mode !== 'full' && !lexicalRoot) throw new Error(`Path is outside MCP_ALLOWED_ROOTS: ${absolute}`);
+  if (config.mode !== 'full' && options.write && containsGitMetadataComponent(absolute)) {
+    throw new Error('Workspace file tools may not modify .git metadata; use normal Git tooling outside the MCP service.');
+  }
 
   const ancestor = await nearestExistingAncestor(absolute);
   const realAncestor = await fs.realpath(ancestor);
