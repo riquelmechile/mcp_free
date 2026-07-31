@@ -35,7 +35,6 @@ const accessMode = modeEnv();
 const verificationSandbox = process.env.MCP_VERIFICATION_SANDBOX !== '0';
 const requestedVerificationNetwork = process.env.MCP_VERIFICATION_NETWORK === '1';
 const githubHostedCi = process.env.CI === 'true' && process.env.GITHUB_ACTIONS === 'true';
-const sandboxCiSharedNetwork = githubHostedCi && process.env.MCP_SANDBOX_CI_SHARED_NETWORK === '1';
 const sandboxCiBypass = githubHostedCi && process.env.MCP_SANDBOX_CI_BYPASS === '1';
 if (accessMode === 'workspace' && !verificationSandbox) {
   throw new Error('MCP_VERIFICATION_SANDBOX=0 is forbidden in workspace mode');
@@ -61,7 +60,6 @@ export const config = {
   logLevel: process.env.MCP_LOG_LEVEL ?? 'info',
   verificationSandbox,
   verificationNetwork: accessMode === 'full' && requestedVerificationNetwork,
-  sandboxCiSharedNetwork,
   sandboxCiBypass,
   home
 } as const;
